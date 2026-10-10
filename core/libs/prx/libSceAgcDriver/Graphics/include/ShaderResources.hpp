@@ -73,14 +73,23 @@ public:
     struct SetAllocation {
         VkDescriptorSet set = VK_NULL_HANDLE;
         VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        bool updateAfterBind = false;
     };
+    // A set from a chain pool that Free released comes back for the same layout without a Vulkan
+    // call (every consumer writes all of its descriptors before use, so stale contents are
+    // harmless); up to RecycledSetsPerLayout wait per layout, the rest are freed to their pool.
+    // Debug aid: APS5_NO_DESCRIPTOR_RECYCLE=1 frees every set as before.
+    static constexpr std::size_t RecycledSetsPerLayout = 4096;
     SetAllocation Allocate(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind = false);
     void Free(const SetAllocation& allocation) noexcept;
-    // APS5_PROFILE_DRAW counters: layouts served from the map / created, sets allocated, pools opened.
+    // APS5_PROFILE_DRAW counters: layouts served from the map / created, sets allocated (recycled
+    // ones apart), pools opened.
     struct Stats {
         std::uint64_t layoutHits = 0;
         std::uint64_t layoutMisses = 0;
         std::uint64_t sets = 0;
+        std::uint64_t recycled = 0;
         std::uint64_t pools = 0;
         std::uint64_t dedicatedPools = 0;
     };
@@ -96,6 +105,12 @@ private:
     std::vector<VkDescriptorPool> pools;
     std::vector<VkDescriptorPool> updateAfterBindPools;
     std::vector<VkDescriptorPool> dedicated;
+    struct RecycledSet {
+        VkDescriptorSet set;
+        VkDescriptorPool pool;
+    };
+    std::unordered_map<VkDescriptorSetLayout, std::vector<RecycledSet>> recycled;
+    std::unordered_map<VkDescriptorSetLayout, std::vector<RecycledSet>> recycledUpdateAfterBind;
     Stats stats;
 };
 

@@ -1609,7 +1609,7 @@ void ShaderResources::reportDescriptorCaches() const {
     const auto descriptors = context.descriptorCache != nullptr ? context.descriptorCache->Counters() : DescriptorCache::Stats{};
     const auto samplerHits = context.samplerCache != nullptr ? context.samplerCache->Hits() : 0;
     const auto samplerMisses = context.samplerCache != nullptr ? context.samplerCache->Misses() : 0;
-    AgcDriver::ProfilePrint_nid_no_patch("[descriptors] layouts %llu hits / %llu created, sets %llu from %llu pools and %llu dedicated pools, samplers %llu hits / %llu created\n", static_cast<unsigned long long>(descriptors.layoutHits), static_cast<unsigned long long>(descriptors.layoutMisses), static_cast<unsigned long long>(descriptors.sets), static_cast<unsigned long long>(descriptors.pools), static_cast<unsigned long long>(descriptors.dedicatedPools), static_cast<unsigned long long>(samplerHits), static_cast<unsigned long long>(samplerMisses));
+    AgcDriver::ProfilePrint_nid_no_patch("[descriptors] layouts %llu hits / %llu created, sets %llu from %llu pools and %llu dedicated pools, %llu recycled, samplers %llu hits / %llu created\n", static_cast<unsigned long long>(descriptors.layoutHits), static_cast<unsigned long long>(descriptors.layoutMisses), static_cast<unsigned long long>(descriptors.sets), static_cast<unsigned long long>(descriptors.pools), static_cast<unsigned long long>(descriptors.dedicatedPools), static_cast<unsigned long long>(descriptors.recycled), static_cast<unsigned long long>(samplerHits), static_cast<unsigned long long>(samplerMisses));
 }
 
 template<typename TVisitor>
@@ -2604,6 +2604,15 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
         if (capacity == ChainPoolSizes.end() || size.descriptorCount > capacity->descriptorCount) fits = false;
     }
     std::lock_guard lock(mutex);
+    if (fits) {
+        auto& waiting = updateAfterBind ? recycledUpdateAfterBind : recycled;
+        if (const auto found = waiting.find(layout); found != waiting.end() && !found->second.empty()) {
+            const auto entry = found->second.back();
+            found->second.pop_back();
+            ++stats.recycled;
+            return {entry.set, entry.pool, layout, updateAfterBind};
+        }
+    }
     const auto allocate = context.Resolved(&DeviceFunctions::allocateDescriptorSets, "vkAllocateDescriptorSets");
     VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocation.descriptorSetCount = 1;
@@ -2621,7 +2630,7 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
         dedicated.push_back(pool);
         ++stats.dedicatedPools;
         ++stats.sets;
-        return {set, pool};
+        return {set, pool, layout, updateAfterBind};
     }
     // Newest pool first: it has the most room; a full or fragmented pool is left for its sets to
     // drain and tried again later.
@@ -2632,7 +2641,7 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
         const auto result = allocate(context.device, &allocation, &set);
         if (result == VK_SUCCESS) {
             ++stats.sets;
-            return {set, *it};
+            return {set, *it, layout, updateAfterBind};
         }
         if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL) Check(result, "vkAllocateDescriptorSets");
     }
@@ -2649,16 +2658,27 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
     VkDescriptorSet set = VK_NULL_HANDLE;
     Check(allocate(context.device, &allocation, &set), "vkAllocateDescriptorSets");
     ++stats.sets;
-    return {set, pool};
+    return {set, pool, layout, updateAfterBind};
 }
 
 void DescriptorCache::Free(const SetAllocation& allocation) noexcept {
     if (allocation.set == VK_NULL_HANDLE || allocation.pool == VK_NULL_HANDLE) return;
+    static const bool noRecycle = std::getenv("APS5_NO_DESCRIPTOR_RECYCLE") != nullptr;
     std::lock_guard lock(mutex);
     if (const auto found = std::find(dedicated.begin(), dedicated.end(), allocation.pool); found != dedicated.end()) {
         dedicated.erase(found);
         destroyPool(context.device, allocation.pool, nullptr);
         return;
+    }
+    if (!noRecycle && allocation.layout != VK_NULL_HANDLE) {
+        try {
+            auto& waiting = (allocation.updateAfterBind ? recycledUpdateAfterBind : recycled)[allocation.layout];
+            if (waiting.size() < RecycledSetsPerLayout) {
+                waiting.push_back({allocation.set, allocation.pool});
+                return;
+            }
+        } catch (...) {
+        }
     }
     static_cast<void>(freeSets(context.device, allocation.pool, 1, &allocation.set));
 }
@@ -3178,8 +3198,10 @@ ShaderResources::~ShaderResources() {
 }
 
 void ShaderResources::release() noexcept {
-    // A set from the cache's pool chain goes back to it; a dedicated pool dies with its set.
-    if (cachePool && context.descriptorCache != nullptr) context.descriptorCache->Free({_set, cachePool});
+    // A set from the cache's pool chain goes back to it (recycled under its layout only when the
+    // cache owns that layout: a layout destroyed below could lend its handle to a different one); a
+    // dedicated pool dies with its set.
+    if (cachePool && context.descriptorCache != nullptr) context.descriptorCache->Free({_set, cachePool, ownsLayout ? VK_NULL_HANDLE : _layout, updateAfterBind});
     if (pool) context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")(context.device, pool, nullptr);
     if (_layout && ownsLayout) context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(context.device, _layout, nullptr);
     cachePool = VK_NULL_HANDLE;

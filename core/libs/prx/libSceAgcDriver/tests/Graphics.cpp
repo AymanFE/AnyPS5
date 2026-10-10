@@ -1829,7 +1829,15 @@ void descriptorCacheTests() {
         const auto chained = cache.Allocate(layout(4096), fitting);
         Require(chained.set != VK_NULL_HANDLE && mock.poolMaxSets == 1024 && mock.poolFlags == VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT && cache.Counters().pools == 1, "a set the chain pool holds left the chain");
         cache.Free(chained);
-        Require(mock.freedSets == 1 && mock.live == live + 2, "a chain set was not freed back to its pool");
+        Require(mock.freedSets == 0 && mock.live == live + 2, "a freed chain set was not kept for reuse");
+        const auto reused = cache.Allocate(layout(4096), fitting);
+        Require(reused.set == chained.set && reused.pool == chained.pool && cache.Counters().recycled == 1 && cache.Counters().sets == 2, "a kept chain set was not reused for its layout");
+        const auto other = layout(4095);
+        const auto fresh = cache.Allocate(other, fitting);
+        Require(fresh.set != chained.set && cache.Counters().recycled == 1 && cache.Counters().sets == 3, "a kept set served a different layout");
+        cache.Free(reused);
+        cache.Free(fresh);
+        Require(mock.freedSets == 0, "a chain set was freed instead of kept");
         const std::array<VkDescriptorPoolSize, 1> beyondDevice{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8193}}};
         expectFailure([&] { cache.Allocate(large, beyondDevice); }, "descriptor set exceeds the device's per-set descriptor limit");
         const std::array<VkDescriptorPoolSize, 1> storageImages{{{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}}};

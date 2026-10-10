@@ -1086,8 +1086,9 @@ void resourceReadTests(const Device& device, Recorder& recorder) {
         const auto commands = snapshotRecorder.Commands();
         RecordMemoryBarrier(snapshotContext, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         const auto copy = snapshotContext.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer");
-        VkBufferCopy region{0, 0, elementBytes};
+        VkBufferCopy region{first->snapshots[0].offset, 0, elementBytes};
         copy(commands, first->snapshots[0].buffer->Handle(), downloaded->Handle(), 1, &region);
+        region.srcOffset = second->snapshots[0].offset;
         region.dstOffset = elementBytes;
         copy(commands, second->snapshots[0].buffer->Handle(), downloaded->Handle(), 1, &region);
         RecordMemoryBarrier(snapshotContext, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
@@ -1188,7 +1189,7 @@ void misalignedRegionTests(const Device& device, Recorder& recorder) {
         const auto check = [&] {
             const auto bindings = resources.PrepareDrawBindings(regionRecorder);
             Require(bindings != nullptr && bindings->snapshots.size() == 1, "the read-only misaligned draw input was not snapshotted");
-            const auto contents = bindings->snapshots.front().buffer->Bytes();
+            const auto contents = bindings->snapshots.front().Bytes();
             Require(bindings->snapshots.front().address == view - adjustment && contents.size() == adjustment + elementBytes, "the draw snapshot does not start at the aligned offset below the view");
             Require(std::memcmp(contents.data() + adjustment, guest + offset, elementBytes) == 0, "the shader's patched offset into the draw snapshot misses the view's bytes");
         };
@@ -1272,9 +1273,9 @@ void misalignedSnapshotTests(const Device& device, Recorder& recorder) {
         Require(push[0] == std::byte{0} && adjustment == offset % alignment, "the inner view's shader offset is not its distance from the binding");
         const auto bindings = resources.PrepareDrawBindings(snapshotRecorder);
         Require(bindings != nullptr && bindings->snapshots.size() == 2, "read-only draw inputs were not snapshotted");
-        const auto outerContents = bindings->snapshots[0].buffer->Bytes();
+        const auto outerContents = bindings->snapshots[0].Bytes();
         Require(outerContents.size() >= outerBytes && std::memcmp(outerContents.data(), guest + outer, outerBytes) == 0, "an aligned draw snapshot misses its view's bytes");
-        const auto contents = bindings->snapshots[1].buffer->Bytes();
+        const auto contents = bindings->snapshots[1].Bytes();
         Require(contents.size() >= adjustment + elementBytes, "a draw snapshot ends before the bytes the shader reads");
         Require(std::memcmp(contents.data() + adjustment, guest + offset, elementBytes) == 0, "the shader's offset into a draw snapshot misses the view's bytes");
         snapshotRecorder.Sync();
@@ -1342,10 +1343,9 @@ void drawSnapshotReuseTests(const Device& device, Recorder& recorder) {
         const auto snapshot = [&](std::byte expected) {
             const auto bindings = resources.PrepareDrawBindings(snapshotRecorder);
             Require(bindings != nullptr && bindings->snapshots.size() == 1, "read-only draw input was not snapshotted");
-            const auto buffer = bindings->snapshots[0].buffer;
-            const auto contents = buffer->Bytes();
+            const auto contents = bindings->snapshots[0].Bytes();
             Require(contents.size() == elementBytes && std::all_of(contents.begin(), contents.end(), [&](std::byte value) { return value == expected; }), "a draw snapshot does not hold the guest bytes of its draw");
-            return buffer;
+            return std::make_pair(bindings->snapshots[0].buffer, bindings->snapshots[0].offset);
         };
         const auto first = snapshot(std::byte{0x11});
         Require(snapshot(std::byte{0x11}) == first, "an unchanged draw input was copied again");
