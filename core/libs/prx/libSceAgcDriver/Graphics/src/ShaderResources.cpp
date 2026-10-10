@@ -84,6 +84,7 @@ TextureKey MakeTextureKey(VkDevice device, std::span<const std::uint32_t> words,
     TextureKey key{device, {}, {static_cast<std::uint32_t>(components.r), static_cast<std::uint32_t>(components.g), static_cast<std::uint32_t>(components.b), static_cast<std::uint32_t>(components.a)}};
     key.depthCompare = depthCompare;
     std::copy(words.begin(), words.end(), key.words.begin());
+    if (words.size() > 1) key.words[1] &= ~0x000fff00u;
     return key;
 }
 
@@ -101,7 +102,27 @@ struct CachedTexture {
     std::shared_ptr<StorageTexture> source;
     std::uint64_t sourceVersion = 0;
     std::uint64_t accounted = 0;
+    // The minimum LOD clamp `texture` was made with; descriptors differing only in their clamp share
+    // the entry through views of the same image.
+    std::uint32_t minLod = 0;
+    std::vector<std::pair<std::uint32_t, std::shared_ptr<Texture>>> lodViews;
 };
+
+bool entryHolds(const CachedTexture& entry, const Texture* texture) {
+    if (entry.texture.get() == texture) return true;
+    return std::any_of(entry.lodViews.begin(), entry.lodViews.end(), [&](const auto& view) { return view.second.get() == texture; });
+}
+
+std::shared_ptr<Texture> viewForMinLod(const Context& context, CachedTexture& entry, const GuestTextureResource& resource, VkComponentMapping components) {
+    if (resource.minLod == entry.minLod) return entry.texture;
+    for (const auto& [minLod, view] : entry.lodViews) {
+        if (minLod == resource.minLod) return view;
+    }
+    auto view = entry.source != nullptr ? std::make_shared<Texture>(context, entry.source, resource, components) : std::make_shared<Texture>(*entry.texture, resource, components);
+    if (entry.lodViews.size() >= 32) entry.lodViews.erase(entry.lodViews.begin());
+    entry.lodViews.emplace_back(resource.minLod, view);
+    return view;
+}
 
 // Entries in use order (front = most recent) with a hash index by key: a lookup is O(1) and the
 // eviction takes the back. APS5_NO_TEXTURE_HASH=1 finds entries by scanning the list (the index is
@@ -503,10 +524,11 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 if (!GuestMemory::UnchangedSince(address, bytes, it->source->Generation())) it->source->Refresh();
                 it->keys = *keys;
                 touchTexture(cache, it);
-                logLookup({it->texture.get(), resource, guestBytes, *keys, 0, it->source.get()});
+                auto texture = viewForMinLod(context, *it, resource, components);
+                logLookup({texture.get(), resource, guestBytes, *keys, 0, it->source.get()});
                 reportTextureCounters();
                 if (profile) LookupOutcomes::Add(*keys != DccKeys::Uncompressed ? LookupOutcomes::SampledHitClearedView : LookupOutcomes::SampledHitView, start);
-                return it->texture;
+                return texture;
             }
         } else if (source == nullptr && (partialLevels ? it->bytes.size() <= guestBytes : it->bytes.size() == guestBytes) && it->keys == *keys) {
             // Unwritten pages need no comparison; partially resident textures compare only committed
@@ -522,10 +544,11 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             if (*keys != DccKeys::Uncompressed || GuestMemory::UnchangedSince(heldAddress, heldBytes, it->generation) || equalsCommitted()) {
                 it->generation = generation;
                 touchTexture(cache, it);
-                logLookup({it->texture.get(), resource, guestBytes, *keys, generation, nullptr});
+                auto texture = viewForMinLod(context, *it, resource, components);
+                logLookup({texture.get(), resource, guestBytes, *keys, generation, nullptr});
                 reportTextureCounters();
                 if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
-                return it->texture;
+                return texture;
             }
         }
         eraseTexture(cache, it);
@@ -534,6 +557,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     const auto viewedAddress = address + viewed.guestOffset;
     const auto viewedBytes = static_cast<std::size_t>(viewed.guestBytes);
     CachedTexture entry{key, viewedAddress, std::vector<std::byte>(source != nullptr ? 0u : viewedBytes), nullptr, *keys, generation};
+    entry.minLod = resource.minLod;
     if (source != nullptr) {
         entry.source = source;
         entry.sourceVersion = source->Version();
@@ -2954,7 +2978,7 @@ bool ShaderResources::precollectImages() {
                     auto& cache = Textures();
                     std::lock_guard lock(cache.mutex);
                     if (const auto it = findTexture(cache, MakeTextureKey(context.device, words, record.components)); it != cache.entries.end()) {
-                        record.texture = it->texture;
+                        record.texture = viewForMinLod(context, *it, record.resource, record.components);
                         record.source = it->source;
                         record.entryKeys = it->keys;
                         record.entryGeneration = it->generation;
@@ -3015,7 +3039,7 @@ std::shared_ptr<Texture> ShaderResources::fastTexture(const ImageRecord& record)
     auto& cache = Textures();
     std::lock_guard lock(cache.mutex);
     const auto it = findTexture(cache, MakeTextureKey(context.device, record.words, record.components));
-    if (it == cache.entries.end() || it->texture != record.texture) return nullptr;
+    if (it == cache.entries.end() || !entryHolds(*it, record.texture.get())) return nullptr;
     if (it->source == nullptr) it->generation = record.generation;
     touchTexture(cache, it);
     logLookup({record.texture.get(), record.resource, record.guestBytes, keys, record.source != nullptr ? 0 : record.generation, record.source.get()});

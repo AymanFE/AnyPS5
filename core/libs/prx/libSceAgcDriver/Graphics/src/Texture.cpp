@@ -457,6 +457,9 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
 
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
+        imageAspect = aspect;
+        imageFirstLevel = firstLevel;
+        imageLevelCount = viewed.count;
         createFirstLayerView(descriptor, viewInfo);
         if (profile) {
             auto& totals = Profile();
@@ -529,6 +532,40 @@ Texture::Texture(const Context& context, VkImage depthImage, VkFormat depthForma
     viewInfo.subresourceRange = {aspect, 0, 1, 0, 1};
     Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView depth plane");
     viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
+}
+
+Texture::Texture(const Texture& shared, const GuestTextureResource& descriptor, VkComponentMapping components) : context(shared.context) {
+    Require(shared.owned != nullptr && shared.image != VK_NULL_HANDLE && shared.source == nullptr && shared.storageSource == nullptr, "only a snapshot texture's image can be shared by another view");
+    try {
+        owned = shared.owned;
+        image = shared.image;
+        viewFormat = shared.viewFormat;
+        layout = shared.layout;
+        imageAspect = shared.imageAspect;
+        imageFirstLevel = shared.imageFirstLevel;
+        imageLevelCount = shared.imageLevelCount;
+        const auto geometry = DescribeSurface(descriptor);
+        const auto viewed = DescribeViewedLevels(descriptor, geometry);
+        Require(viewed.first == imageFirstLevel && viewed.count == imageLevelCount, "a shared sampled image holds other levels than the descriptor views");
+        const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
+        if (descriptor.dimension == TextureDimension::kCube) {
+            Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
+        }
+        VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        viewInfo.image = image;
+        viewInfo.viewType = ViewTypeFor(descriptor.dimension, viewLayerCount);
+        viewInfo.format = viewFormat;
+        viewInfo.components = imageAspect == VK_IMAGE_ASPECT_DEPTH_BIT ? VkComponentMapping{} : components;
+        viewInfo.subresourceRange = {imageAspect, 0, imageLevelCount, descriptor.baseArray, viewLayerCount};
+        VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
+        ChainMinLod(context, descriptor, imageFirstLevel, viewInfo, minLod);
+        Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView shared image");
+        viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
+        createFirstLayerView(descriptor, viewInfo);
+    } catch (...) {
+        release();
+        throw;
+    }
 }
 
 Texture::~Texture() {

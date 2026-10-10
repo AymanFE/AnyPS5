@@ -60,6 +60,7 @@ public:
     // compute pass writing it and the next pass sampling it share one image and copy nothing.
     // CanCopyFrom says whether the two descriptors address the same surface compatibly.
     Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
+    Texture(const Texture& shared, const GuestTextureResource& descriptor, VkComponentMapping components);
     Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components);
     static bool CanCopyFrom(const StorageTexture& source, const GuestTextureResource& descriptor);
     ~Texture();
@@ -105,6 +106,9 @@ private:
     VkDeviceSize allocationBytes = 0;
     VkDeviceSize countedBytes = 0;
     VkFormat viewFormat = VK_FORMAT_UNDEFINED;
+    VkImageAspectFlags imageAspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    std::uint32_t imageFirstLevel = 0;
+    std::uint32_t imageLevelCount = 1;
     std::shared_ptr<ResidentColor> source;
     std::shared_ptr<StorageTexture> storageSource;
     std::unique_ptr<CommandBatch> upload;
