@@ -29,6 +29,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "prx/libc/include/GuestAllocations.hpp"
 
 namespace AgcDriver::Graphics {
@@ -386,6 +387,7 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
+    BoundDeviceMemory(context);
     if (auto depth = DepthSurfaceTexture(context, words, resource, components)) return depth;
     const auto depthBitsWidth = words.size() >= 4 ? ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) : 0u;
     if (depthBitsWidth == 32u) {
@@ -540,7 +542,18 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             for (std::size_t i = 0; i < entry.bytes.size(); i += 64) nonzero += entry.bytes[i] != std::byte{0};
             std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d: %zu of %zu sampled bytes nonzero\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), nonzero, entry.bytes.size() / 64);
         }
-        entry.texture = std::make_shared<Texture>(context, *context.detiler, resource, components, entry.bytes, depthCompare);
+        const auto room = sampledBudget(context, cache);
+        while (!cache.entries.empty() && cache.bytes + bytes > room) eraseTexture(cache, std::prev(cache.entries.end()));
+        const auto makeSnapshot = [&] { return std::make_shared<Texture>(context, *context.detiler, resource, components, entry.bytes, depthCompare); };
+        try {
+            entry.texture = makeSnapshot();
+        } catch (const DeviceMemoryExhausted& error) {
+            if (cache.entries.empty()) throw;
+            std::fprintf(stderr, "[gpu] sampled texture 0x%llx: %s; dropping the least recently used half of the sampled cache (%llu MiB) and retrying\n", static_cast<unsigned long long>(resource.baseAddress), error.what(), static_cast<unsigned long long>(cache.bytes >> 20u));
+            const auto keep = cache.bytes / 2u;
+            while (!cache.entries.empty() && cache.bytes > keep) eraseTexture(cache, std::prev(cache.entries.end()));
+            entry.texture = makeSnapshot();
+        }
         entry.accounted = entry.texture->AllocationBytes();
         counters.snapshots.fetch_add(1, std::memory_order_relaxed);
     }
@@ -683,6 +696,7 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     if (disabled) return std::make_shared<StorageTexture>(context, *context.detiler, viewed, mip);
     static_cast<void>(words);
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
+    BoundDeviceMemory(context);
     const bool profile = LookupOutcomes::Profiled();
     auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     auto& counters = TextureCounts();
@@ -712,7 +726,20 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     // import buffer without the flush hook. The flush is recorded ahead of the upload in the batch.
     if (guestBytes == 0) guestBytes = DescribeSurface(resource).guestBytes;
     if (StorageTexture::FlushPending(resource.baseAddress, static_cast<std::size_t>(guestBytes), nullptr, "storage image creation", PublishScope::None) && profile) start = LookupOutcomes::Add(LookupOutcomes::PendingFlush, start);
-    CachedStorageTexture entry{key, mip, std::make_shared<StorageTexture>(context, *context.detiler, resource, mip)};
+    const auto budget = storageBudget(context);
+    while (!cache.entries.empty() && cache.bytes + guestBytes > budget) evictStorage(cache, std::prev(cache.entries.end()));
+    const auto makeStorage = [&] { return std::make_shared<StorageTexture>(context, *context.detiler, resource, mip); };
+    std::shared_ptr<StorageTexture> made;
+    try {
+        made = makeStorage();
+    } catch (const DeviceMemoryExhausted& error) {
+        if (cache.entries.empty()) throw;
+        std::fprintf(stderr, "[gpu] storage image 0x%llx: %s; dropping the least recently used half of the storage cache (%llu MiB) and retrying\n", static_cast<unsigned long long>(resource.baseAddress), error.what(), static_cast<unsigned long long>(cache.bytes >> 20u));
+        const auto keep = cache.bytes / 2u;
+        while (!cache.entries.empty() && cache.bytes > keep) evictStorage(cache, std::prev(cache.entries.end()));
+        made = makeStorage();
+    }
+    CachedStorageTexture entry{key, mip, std::move(made)};
     // The constructor's upload may have recorded into the open batch (a GPU clear, a direct
     // detile) before the image could keep itself (no weak_from_this yet): the batch keeps it here,
     // so an eviction or a failed view before it ran cannot destroy a referenced image.
@@ -720,7 +747,6 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     static const bool keepNew = std::getenv("APS5_NO_KEEP_NEW_STORAGE") == nullptr;
     if (auto* recorder = Recorder::Active(); keepNew && recorder != nullptr && GuestMemory::GpuMutex().HeldByThisThread() && recorder->Recording()) recorder->Keep(entry.texture);
     entry.accounted = heldBytes(*entry.texture);
-    const auto budget = storageBudget(context);
     while (!cache.entries.empty() && cache.bytes + entry.accounted > budget) evictStorage(cache, std::prev(cache.entries.end()));
     cache.bytes += entry.accounted;
     auto texture = entry.texture;
@@ -771,6 +797,111 @@ std::uint64_t SampledTextureCacheBudget(const Context& context) {
     auto& cache = Textures();
     std::lock_guard lock(cache.mutex);
     return sampledBudget(context, cache);
+}
+
+namespace {
+
+struct DevicePressure {
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point checked{};
+    std::chrono::steady_clock::time_point reported{};
+    std::chrono::steady_clock::time_point trimmed{};
+    std::uint64_t recentlyTrimmed = 0;
+    std::uint64_t checks = 0;
+    std::uint64_t overs = 0;
+    std::uint64_t sampledBytes = 0;
+    std::uint64_t storageBytes = 0;
+    std::uint64_t resourceSets = 0;
+};
+
+DevicePressure& Pressure() {
+    static DevicePressure pressure;
+    return pressure;
+}
+
+std::uint64_t deviceMemoryReserve(std::uint64_t budget) {
+    static const std::uint64_t forced = [] {
+        const char* text = std::getenv("APS5_DEVICE_MEMORY_RESERVE_MIB");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) << 20u : 0u;
+    }();
+    return forced != 0 ? forced : std::max<std::uint64_t>(1024ull << 20u, budget / 8u);
+}
+
+struct DeviceHeapUse {
+    std::uint64_t budget = 0;
+    std::uint64_t usage = 0;
+};
+
+std::optional<DeviceHeapUse> deviceHeapUse(const Context& context) {
+    if (context.memoryProperties2 == nullptr || context.physical == VK_NULL_HANDLE) return std::nullopt;
+    const auto heap = largestDeviceLocalHeap(context.memory);
+    if (!heap) return std::nullopt;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    properties.pNext = &reported;
+    context.memoryProperties2(context.physical, &properties);
+    if (reported.heapBudget[*heap] == 0) return std::nullopt;
+    return DeviceHeapUse{reported.heapBudget[*heap], reported.heapUsage[*heap]};
+}
+
+}
+
+void BoundDeviceMemory(const Context& context) {
+    static const bool disabled = std::getenv("APS5_NO_DEVICE_MEMORY_BOUND") != nullptr;
+    if (disabled || !GuestMemory::GpuMutex().HeldByThisThread()) return;
+    auto& pressure = Pressure();
+    std::unique_lock guard(pressure.mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - pressure.checked < std::chrono::milliseconds(50)) return;
+    pressure.checked = now;
+    const auto use = deviceHeapUse(context);
+    if (!use) return;
+    ++pressure.checks;
+    const auto reserve = deviceMemoryReserve(use->budget);
+    const auto ceiling = use->budget > reserve ? use->budget - reserve : 0u;
+    std::uint64_t excess = use->usage > ceiling ? use->usage - ceiling : 0u;
+    if (now - pressure.trimmed >= std::chrono::seconds(1)) pressure.recentlyTrimmed = 0;
+    excess = excess > pressure.recentlyTrimmed ? excess - pressure.recentlyTrimmed : 0u;
+    if (excess != 0) {
+        ++pressure.overs;
+        pressure.trimmed = now;
+        std::uint64_t freed = 0;
+        {
+            auto& cache = Textures();
+            std::lock_guard lock(cache.mutex);
+            while (!cache.entries.empty() && freed < excess) {
+                const auto back = std::prev(cache.entries.end());
+                freed += back->accounted;
+                pressure.sampledBytes += back->accounted;
+                eraseTexture(cache, back);
+            }
+        }
+        if (freed < excess) {
+            auto& cache = StorageTextures();
+            std::lock_guard lock(cache.mutex);
+            while (!cache.entries.empty() && freed < excess) {
+                const auto back = std::prev(cache.entries.end());
+                freed += back->accounted;
+                pressure.storageBytes += back->accounted;
+                evictStorage(cache, back);
+            }
+        }
+        if (freed < excess) {
+            auto& sets = SharedResourceCache();
+            const auto count = std::max<std::size_t>(1, std::min<std::size_t>(sets.Size() / 4u, 256u));
+            std::vector<std::shared_ptr<ShaderResources>> evicted;
+            auto* recorder = Recorder::Active();
+            sets.Trim(count, recorder != nullptr && recorder->Recording() ? &evicted : nullptr);
+            pressure.resourceSets += evicted.size();
+            for (auto& object : evicted) recorder->Keep(std::move(object));
+        }
+        pressure.recentlyTrimmed += freed;
+    }
+    if (pressure.reported == std::chrono::steady_clock::time_point{} || (excess != 0 && now - pressure.reported >= std::chrono::seconds(10))) {
+        pressure.reported = now;
+        std::fprintf(stderr, "[gpu] device memory: %llu MiB used of a %llu MiB budget, reserve %llu MiB (APS5_DEVICE_MEMORY_RESERVE_MIB); live sampled textures %llu MiB, storage images %llu MiB; %llu of %llu checks over the ceiling, trimmed %llu MiB sampled, %llu MiB storage, %llu resource sets\n", static_cast<unsigned long long>(use->usage >> 20u), static_cast<unsigned long long>(use->budget >> 20u), static_cast<unsigned long long>(reserve >> 20u), static_cast<unsigned long long>(SampledTextureMemory() >> 20u), static_cast<unsigned long long>(StorageTextureMemory() >> 20u), static_cast<unsigned long long>(pressure.overs), static_cast<unsigned long long>(pressure.checks), static_cast<unsigned long long>(pressure.sampledBytes >> 20u), static_cast<unsigned long long>(pressure.storageBytes >> 20u), static_cast<unsigned long long>(pressure.resourceSets));
+    }
 }
 
 std::shared_ptr<Texture> CachedSampledTexture(const Context& context, std::span<const std::uint32_t> words) {
@@ -2364,6 +2495,15 @@ void ResourceCache::Clear() {
     std::lock_guard lock(mutex);
     index.clear();
     entries.clear();
+}
+
+void ResourceCache::Trim(std::size_t count, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
+    std::lock_guard lock(mutex);
+    while (count-- != 0 && !entries.empty()) {
+        if (evicted != nullptr) evicted->push_back(std::move(entries.back().second));
+        index.erase(entries.back().first);
+        entries.pop_back();
+    }
 }
 
 std::size_t ResourceCache::Size() const {

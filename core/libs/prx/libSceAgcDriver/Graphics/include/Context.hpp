@@ -29,8 +29,15 @@ inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
 }
 
+struct DeviceMemoryExhausted : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 inline void Check(VkResult result, const char* operation) {
-    if (result != VK_SUCCESS) throw std::runtime_error(std::string("AGC graphics: ") + operation + ": Vulkan result " + std::to_string(result));
+    if (result == VK_SUCCESS) return;
+    const auto text = std::string("AGC graphics: ") + operation + ": Vulkan result " + std::to_string(result);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) throw DeviceMemoryExhausted(text);
+    throw std::runtime_error(text);
 }
 
 inline void Require(bool condition, const char* reason) {

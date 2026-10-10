@@ -36,6 +36,7 @@ struct TextureCacheUse {
 };
 TextureCacheUse TextureCacheUsage();
 std::uint64_t SampledTextureCacheBudget(const Context& context);
+void BoundDeviceMemory(const Context& context);
 std::shared_ptr<Texture> CachedSampledTexture(const Context& context, std::span<const std::uint32_t> words);
 
 // The cached storage image of a surface (render targets use it as their resident image); brought up
@@ -508,6 +509,7 @@ public:
     static std::uint64_t Touches();
     void Clear();
     std::size_t Size() const;
+    void Trim(std::size_t count, std::vector<std::shared_ptr<ShaderResources>>* evicted = nullptr);
 
 private:
     void erase(const Key& key);

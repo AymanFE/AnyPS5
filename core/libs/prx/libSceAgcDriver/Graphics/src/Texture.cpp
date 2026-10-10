@@ -234,6 +234,19 @@ std::uint64_t SampledTextureMemory() {
     return SampledMemoryCounter().load(std::memory_order_relaxed);
 }
 
+namespace {
+
+std::atomic<std::uint64_t>& StorageMemoryCounter() {
+    static std::atomic<std::uint64_t> bytes{0};
+    return bytes;
+}
+
+}
+
+std::uint64_t StorageTextureMemory() {
+    return StorageMemoryCounter().load(std::memory_order_relaxed);
+}
+
 Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare) : context(context) {
 
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -745,6 +758,8 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         memoryBytes = requirements.size;
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory storage texture");
+        countedMemoryBytes = memoryBytes;
+        StorageMemoryCounter().fetch_add(memoryBytes, std::memory_order_relaxed);
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory storage");
         uploadReason = "first";
         upload();
@@ -1064,6 +1079,8 @@ VkImageView StorageTexture::AttachmentProxyView() {
         allocation.allocationSize = requirements.size;
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &proxyMemory), "vkAllocateMemory attachment proxy");
+        countedMemoryBytes += requirements.size;
+        StorageMemoryCounter().fetch_add(requirements.size, std::memory_order_relaxed);
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, proxyImage, proxyMemory, 0), "vkBindImageMemory attachment proxy");
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = proxyImage;
@@ -3841,6 +3858,7 @@ void StorageTexture::release() noexcept {
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
     if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    StorageMemoryCounter().fetch_sub(std::exchange(countedMemoryBytes, 0), std::memory_order_relaxed);
 }
 
 std::uint64_t StorageTexture::GuestBytes() const {
