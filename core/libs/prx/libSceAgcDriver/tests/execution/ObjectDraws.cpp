@@ -123,6 +123,8 @@ struct Scene {
     std::unique_ptr<Block> target;
     std::unique_ptr<Block> objects;
     std::vector<ShaderRecompiler::RecompileResult> vertex;
+    mutable std::vector<std::shared_ptr<const AgcDriver::DrawRecipe>> recipes;
+    mutable std::size_t recipeHits = 0;
     ShaderRecompiler::RecompileResult pixel;
     AgcDriver::Graphics::State state{};
     AgcDriver::Pm4::DrawParameters draw{0u, 3u, 0u, 1u, 0u, false};
@@ -157,6 +159,7 @@ Scene Build(AgcDriver::VulkanDevice& device) {
         scene.vertex.push_back(ShaderRecompiler::Recompile(request));
         Require(scene.vertex.back().vertexInputs.empty(), "runtime vertex fetch created Vulkan vertex attributes");
     }
+    scene.recipes.resize(Objects);
     scene.pushBytes = static_cast<std::uint32_t>(scene.vertex.front().pushConstants.size());
     for (const auto& vertex : scene.vertex) Require(vertex.pushConstants.size() == scene.pushBytes, "objects differ in their push constant size");
     ShaderRecompiler::ShaderPixelStageInfo pixelInfo{};
@@ -187,7 +190,13 @@ Scene Build(AgcDriver::VulkanDevice& device) {
 
 void DrawObject(AgcDriver::VulkanDevice& device, const Scene& scene, std::size_t object) {
     const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderStage::Vertex, &scene.vertex[object], 0u}, {ShaderStage::Fragment, &scene.pixel, scene.pushBytes}}};
-    device.Draw(scene.state, scene.draw, shaders);
+    auto& recipe = scene.recipes[object];
+    if (recipe != nullptr && device.DrawFromRecipe(scene.state, scene.draw, shaders, {}, recipe) == AgcDriver::RecipeOutcome::Recorded) {
+        ++scene.recipeHits;
+        return;
+    }
+    recipe = nullptr;
+    device.Draw(scene.state, scene.draw, shaders, {}, &recipe);
 }
 
 void CheckPixels(AgcDriver::VulkanDevice& device, const Scene& scene) {
@@ -207,6 +216,7 @@ void Run(AgcDriver::VulkanDevice& device) {
         for (std::size_t object = 0; object < Objects; ++object) DrawObject(device, scene, object);
     }
     CheckPixels(device, scene);
+    Require(scene.recipeHits == 2 * Objects, "object draws did not record from their recipes");
 }
 
 void Benchmark(AgcDriver::VulkanDevice& device, std::size_t draws, double seconds) {
@@ -231,7 +241,7 @@ void Benchmark(AgcDriver::VulkanDevice& device, std::size_t draws, double second
     const auto done = std::chrono::steady_clock::now();
     CheckPixels(device, scene);
     const auto us = [](auto from, auto to) { return std::chrono::duration<double, std::micro>(to - from).count(); };
-    std::cout << "object draws: " << recordingUs / static_cast<double>(issued) << " us per draw recording, " << us(start, recorded) / static_cast<double>(issued) << " us per draw with submissions, over " << issued << " draws in frames of " << FrameDraws << ", " << us(recorded, done) / 1000.0 << " ms to finish, " << static_cast<double>(AgcDriver::Graphics::DeviceProcLookups() - lookupsBefore) / static_cast<double>(issued) << " device function lookups per draw\n";
+    std::cout << "object draws: " << recordingUs / static_cast<double>(issued) << " us per draw recording, " << us(start, recorded) / static_cast<double>(issued) << " us per draw with submissions, over " << issued << " draws in frames of " << FrameDraws << ", " << us(recorded, done) / 1000.0 << " ms to finish, " << static_cast<double>(AgcDriver::Graphics::DeviceProcLookups() - lookupsBefore) / static_cast<double>(issued) << " device function lookups per draw, " << scene.recipeHits << " recipe hits\n";
 }
 
 }

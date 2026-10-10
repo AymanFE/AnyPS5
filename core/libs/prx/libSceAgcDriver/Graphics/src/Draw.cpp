@@ -692,7 +692,7 @@ bool DrawRecipes() {
 }
 
 const char* DrawRecipeMissName(DrawRecipeMiss miss) {
-    constexpr std::array<const char*, static_cast<std::size_t>(DrawRecipeMiss::Count)> names{"none", "not recordable", "target gone", "template gone", "objects gone", "proof"};
+    constexpr std::array<const char*, static_cast<std::size_t>(DrawRecipeMiss::Count)> names{"none", "not recordable", "target gone", "template gone", "objects gone", "proof", "moved buffers"};
     return names[static_cast<std::size_t>(miss)];
 }
 
@@ -1768,7 +1768,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         // only a template the resource cache serves under this content key (reusable: no lease,
         // no copied writes, every direct region import- or mirror-served) of a direct draw, so a
         // hit's proof is the template's ProveCurrent and nothing needs completion work.
-        if (recipeOut != nullptr && DrawRecipes() && cacheable && !outcome.waited && args == nullptr && resources->Reusable() && !state.depth && resolved.moved.empty()) {
+        if (recipeOut != nullptr && DrawRecipes() && cacheable && !outcome.waited && args == nullptr && resources->Reusable()) {
             auto recipe = std::make_shared<DrawRecipe>();
             recipe->device = context.device;
             recipe->templateRef = resources;
@@ -1783,10 +1783,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             passKey = (passKey ^ state.renderExtent.height) * 1099511628211ull;
             recipe->passKey = passKey;
             recipe->vertexInput = inputs.vertexInput;
-            recipe->pushStages = PushConstantStages(shaders);
-            if (recipe->pushStages != 0) {
-                recipe->pushBytes = AssemblePushConstants(shaders);
-                resources->PatchPushConstants(recipe->pushBytes);
+            recipe->programs.reserve(shaders.size());
+            for (const auto& shader : shaders) {
+                const bool generated = state.rectList && (shader.stage == ShaderRecompiler::ShaderStage::TessellationControl || shader.stage == ShaderRecompiler::ShaderStage::TessellationEvaluation);
+                recipe->programs.push_back({shader.stage, generated ? std::uint64_t{0} : shader.program->PipelineVariantId(), shader.pushConstantOffset});
             }
             recipe->masked = masked;
             recipe->fragmentOutputs = inputs.fragmentOutputs;
@@ -2054,7 +2054,16 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     Require(!draw.indirect, "a draw recipe covers direct draws only");
     auto* recorder = Recorder::Active();
     if (!RecordDraws() || recorder == nullptr || DumpTargetLimit() != 0) return miss(DrawRecipeMiss::NotRecordable);
-    Require(recipe.targets.size() == state.colors.size() && recipe.targetViews.size() == state.colors.size(), "draw recipe targets do not match the state");
+    Require(recipe.targets.size() == state.colors.size(), "draw recipe targets do not match the state");
+    if (recipe.targetViews.size() != state.colors.size() + (state.depth ? 1u : 0u)) return miss(DrawRecipeMiss::TargetGone);
+    if (recipe.programs.size() != shaders.size()) return miss(DrawRecipeMiss::ObjectsGone);
+    for (std::size_t index = 0; index < shaders.size(); ++index) {
+        const auto& shader = shaders[index];
+        const auto& program = recipe.programs[index];
+        if (shader.program == nullptr || shader.stage != program.stage || shader.pushConstantOffset != program.pushConstantOffset) return miss(DrawRecipeMiss::ObjectsGone);
+        const bool generated = state.rectList && (shader.stage == ShaderRecompiler::ShaderStage::TessellationControl || shader.stage == ShaderRecompiler::ShaderStage::TessellationEvaluation);
+        if (!generated && shader.program->PipelineVariantId() != program.variant) return miss(DrawRecipeMiss::ObjectsGone);
+    }
     auto inputs = prepareDrawInputs(context, state, draw, shaders, outcome, timer, &recipe);
     if (inputs.nothing) {
         result.recorded = true;
@@ -2080,6 +2089,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
         if (resident == nullptr) return miss(DrawRecipeMiss::TargetGone);
         targets.push_back(std::move(resident));
     }
+    if (state.depth && DepthSurfaceView(context, *state.depth) != recipe.targetViews.back()) return miss(DrawRecipeMiss::TargetGone);
     timer.phase(PhasePrepare);
     // The template's proof (rules R6/R7): ProveCurrent, T1 included, the alias checks the trimmed
     // key leaves to a hit repeated; a failure removes the template from the cache (the batch keeps
@@ -2096,6 +2106,11 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
         recorder->Keep(std::move(resources));
         timer.phase(PhaseLookup);
         return miss(DrawRecipeMiss::Proof);
+    }
+    const auto moved = resources->MovedReadOnlyBuffers(shaders, *recorder);
+    if (!moved.has_value()) {
+        timer.phase(PhaseLookup);
+        return miss(DrawRecipeMiss::Moved);
     }
     CheckBufferAliases(shaders, state.color, draw.indexAddress, inputs.indexBytes);
     SharedResourceCache().Touch(recipe.key);
@@ -2120,8 +2135,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     record.framebuffer = std::move(framebuffer);
     record.targetViews = recipe.targetViews;
     record.targets = std::move(targets);
-    record.pushBytes = &recipe.pushBytes;
-    record.pushStages = recipe.pushStages;
+    record.moved = *moved;
     recordDraw(context, state, draw, shaders, inputs, record, outcome, timer, ownWaitedMs);
     if (profile) {
         result.recordUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - recordStart).count();

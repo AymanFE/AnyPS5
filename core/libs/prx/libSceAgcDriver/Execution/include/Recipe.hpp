@@ -79,8 +79,12 @@ struct DrawRecipe {
     std::vector<VkImageView> targetViews;
     std::uint64_t passKey = 0;
     Graphics::VertexInputLayout vertexInput;
-    std::array<std::byte, Graphics::PipelinePushConstantBytes> pushBytes{};
-    VkShaderStageFlags pushStages = 0;
+    struct Program {
+        ShaderRecompiler::ShaderStage stage;
+        std::uint64_t variant;
+        std::uint32_t pushConstantOffset;
+    };
+    std::vector<Program> programs;
     std::optional<Graphics::State> masked;
     std::set<std::uint32_t> fragmentOutputs;
     VkPipelineStageFlags shaderStages = 0;
