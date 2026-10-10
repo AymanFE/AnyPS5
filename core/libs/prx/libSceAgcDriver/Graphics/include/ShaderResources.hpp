@@ -124,6 +124,9 @@ public:
         struct Snapshot {
             std::uint64_t address;
             std::shared_ptr<Buffer> buffer;
+            VkDeviceSize offset = 0;
+            std::size_t bytes = 0;
+            std::span<std::byte> Bytes() const { return buffer->Bytes().subspan(static_cast<std::size_t>(offset), bytes); }
         };
         DescriptorCache* cache = nullptr;
         DescriptorCache::SetAllocation allocation;

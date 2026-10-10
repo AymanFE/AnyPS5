@@ -95,8 +95,15 @@ public:
     static constexpr std::size_t DrawSnapshotEntries = 1024;
     static constexpr std::size_t DrawInputBudget = std::size_t{1024} << 20u;
     static constexpr std::size_t DrawInputEntries = 16384;
-    std::shared_ptr<Buffer> ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use = SnapshotUse::Storage, std::uint32_t* derived = nullptr);
-    void KeepDrawSnapshot(std::uint64_t address, std::size_t bytes, std::uint64_t generation, std::uint64_t registryGeneration, std::shared_ptr<Buffer> buffer, SnapshotUse use = SnapshotUse::Storage, std::uint32_t derived = 0);
+    std::shared_ptr<Buffer> ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use = SnapshotUse::Storage, std::uint32_t* derived = nullptr, VkDeviceSize* offset = nullptr);
+    void KeepDrawSnapshot(std::uint64_t address, std::size_t bytes, std::uint64_t generation, std::uint64_t registryGeneration, std::shared_ptr<Buffer> buffer, SnapshotUse use = SnapshotUse::Storage, std::uint32_t derived = 0, VkDeviceSize offset = 0);
+    struct SnapshotSlice {
+        std::shared_ptr<Buffer> buffer;
+        VkDeviceSize offset = 0;
+        std::size_t bytes = 0;
+    };
+    static constexpr std::size_t DrawSnapshotChunkBytes = std::size_t{1} << 20u;
+    SnapshotSlice AllocateDrawSnapshot(std::size_t bytes);
     void OnComplete(std::function<void()> action);
     void NotePendingWrite(std::uint64_t address, std::size_t bytes);
     void NotePendingFill(std::uint64_t address, std::size_t bytes, std::uint8_t value);
@@ -755,7 +762,10 @@ private:
         std::list<DrawSnapshotKey>::iterator recent;
         std::shared_ptr<Buffer> buffer;
         std::uint32_t derived;
+        VkDeviceSize offset;
     };
+    std::shared_ptr<Buffer> snapshotChunk;
+    std::size_t snapshotChunkUsed = 0;
     struct DrawSnapshotPool {
         std::list<DrawSnapshotKey> recency;
         std::size_t bytes = 0;
