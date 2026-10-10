@@ -358,6 +358,61 @@ void RunTextureTilingTests() {
         Require(dense.pitchBytes == 1024 && CoveredMipBytes(TextureTileMode::kLinear, 4, dense) == std::vector<std::pair<std::uint64_t, std::uint64_t>>{{0, 3072}}, "linear rows without padding are not one range");
     }
 
+    {
+        GuestTextureResource resource{};
+        resource.width = 1024;
+        resource.height = 1024;
+        resource.mipCount = 11;
+        resource.lastLevel = 10;
+        resource.tileMode = TextureTileMode::kStandard64KB;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = 182;
+        const auto geometry = DescribeSurface(resource);
+        const auto whole = DescribeViewedLevels(resource, geometry);
+        Require(whole.whole && whole.first == 0 && whole.count == 11 && whole.guestOffset == 0 && whole.guestBytes == geometry.guestBytes && whole.linearOffset == 0 && whole.linearBytes == geometry.sliceLinearBytes, "a descriptor over the whole chain views the whole surface");
+
+        resource.baseLevel = 3;
+        const auto streamed = DescribeViewedLevels(resource, geometry);
+        Require(!streamed.whole && streamed.first == 3 && streamed.count == 8, "a base level views the levels from it to the last");
+        std::uint64_t expectedBegin = geometry.guestBytes;
+        std::uint64_t expectedEnd = 0;
+        for (std::uint32_t level = 3; level < 11; ++level) {
+            expectedBegin = std::min(expectedBegin, geometry.mips[level].tiledOffset);
+            expectedEnd = std::max(expectedEnd, geometry.mips[level].tiledOffset + geometry.mips[level].tiledSize);
+        }
+        Require(streamed.guestOffset == expectedBegin && streamed.guestOffset + streamed.guestBytes == expectedEnd, "the viewed guest range covers exactly the viewed levels");
+        Require(streamed.guestOffset + streamed.guestBytes == geometry.mips[3].tiledOffset + geometry.mips[3].tiledSize, "the viewed guest range ends with the base level, which 64 KiB tiling stores last");
+        Require(streamed.guestBytes * 16 <= geometry.guestBytes, "viewing from level 3 holds at most a sixteenth of the surface");
+        for (std::uint32_t level = 3; level < 11; ++level) {
+            const auto& mip = geometry.mips[level];
+            Require(mip.tiledOffset >= streamed.guestOffset && mip.tiledOffset + mip.tiledSize <= streamed.guestOffset + streamed.guestBytes, "a viewed level lies inside the viewed guest range");
+            Require(mip.linearOffset >= streamed.linearOffset && mip.linearOffset + mip.linearSize <= streamed.linearOffset + streamed.linearBytes, "a viewed level lies inside the viewed linear range");
+        }
+        Require(geometry.mips[0].tiledOffset >= streamed.guestOffset + streamed.guestBytes, "level 0 lies outside the viewed guest range");
+
+        resource.baseLevel = 0;
+        resource.minLod = 2u * 256u + 128u;
+        const auto clamped = DescribeViewedLevels(resource, geometry);
+        Require(clamped.whole && clamped.first == 0 && clamped.count == 11, "a minimum LOD clamp keeps the whole chain, since size and level queries answer for the base level");
+
+        resource.minLod = 0;
+        resource.baseLevel = 10;
+        resource.lastLevel = 10;
+        const auto single = DescribeViewedLevels(resource, geometry);
+        Require(single.first == 10 && single.count == 1 && single.guestBytes == geometry.mips[10].tiledSize, "a single-level view covers that level alone");
+
+        GuestTextureResource array = resource;
+        array.baseLevel = 0;
+        array.lastLevel = 10;
+        array.dimension = TextureDimension::k2DArray;
+        array.depthOrLastArray = 3;
+        array.baseLevel = 9;
+        const auto arrayGeometry = DescribeSurface(array);
+        const auto layered = DescribeViewedLevels(array, arrayGeometry);
+        Require(!layered.whole && layered.first == 9 && layered.count == 2, "an array view from level 9 holds two levels");
+        Require(layered.guestOffset == std::min(arrayGeometry.mips[9].tiledOffset, arrayGeometry.mips[10].tiledOffset) && layered.guestOffset + layered.guestBytes == arrayGeometry.GuestLayerOffset(3) + std::max(arrayGeometry.mips[9].tiledOffset + arrayGeometry.mips[9].tiledSize, arrayGeometry.mips[10].tiledOffset + arrayGeometry.mips[10].tiledSize), "an array view spans from the first layer's viewed levels to the last layer's");
+    }
+
     reject([] { ComputeSurfaceSize({}, 1); }, "empty mip chain");
     reject([] { ComputeSurfaceSize(ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 1), 0); }, "zero array layers");
 }

@@ -621,10 +621,10 @@ DccKeyProofCounts KeyProofCounts() {
     return {counters.proved.load(std::memory_order_relaxed), counters.scanned.load(std::memory_order_relaxed), counters.unstable.load(std::memory_order_relaxed)};
 }
 
-void ReadTextureSurface(const GuestTextureResource& resource, DccKeys keys, std::span<std::byte> bytes) {
+void ReadTextureSurface(const GuestTextureResource& resource, DccKeys keys, std::span<std::byte> bytes, std::uint64_t guestOffset) {
     // Named for the [hooksync] attribution: the read goes through the flush hook.
     const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::TextureRead);
-    if (keys == DccKeys::Uncompressed) GuestMemory::ReadCommitted(resource.baseAddress, bytes);
+    if (keys == DccKeys::Uncompressed) GuestMemory::ReadCommitted(resource.baseAddress + guestOffset, bytes);
     else FillDccClear(ResolveTextureFormat(resource.format), keys, resource.dccAlphaOnMsb, bytes);
 }
 

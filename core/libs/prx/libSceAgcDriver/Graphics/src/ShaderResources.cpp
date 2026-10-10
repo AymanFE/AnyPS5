@@ -481,10 +481,13 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         keys.reset();
     }
     if (!keys.has_value()) keys = scanKeys();
+    const bool partialLevels = source == nullptr && !depthCompare && resource.dccAddress == 0 && *keys == DccKeys::Uncompressed && (resource.baseLevel != 0 || resource.lastLevel + 1u < resource.mipCount);
+    const auto describeViewed = [&] { return partialLevels ? DescribeViewedLevels(resource, DescribeSurface(resource)) : ViewedLevels{0, resource.mipCount, 0, guestBytes, 0, 0, true}; };
     if (disabled) {
         if (source != nullptr) return std::make_shared<Texture>(context, source, resource, components);
-        std::vector<std::byte> snapshot(bytes);
-        ReadTextureSurface(resource, *keys, snapshot);
+        const auto viewed = describeViewed();
+        std::vector<std::byte> snapshot(static_cast<std::size_t>(viewed.guestBytes));
+        ReadTextureSurface(resource, *keys, snapshot, viewed.guestOffset);
         return std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot, depthCompare);
     }
     auto& cache = Textures();
@@ -505,16 +508,18 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 if (profile) LookupOutcomes::Add(*keys != DccKeys::Uncompressed ? LookupOutcomes::SampledHitClearedView : LookupOutcomes::SampledHitView, start);
                 return it->texture;
             }
-        } else if (source == nullptr && it->bytes.size() == guestBytes && it->keys == *keys) {
+        } else if (source == nullptr && (partialLevels ? it->bytes.size() <= guestBytes : it->bytes.size() == guestBytes) && it->keys == *keys) {
             // Unwritten pages need no comparison; partially resident textures compare only committed
             // pages. The compare goes through the flush hook: it waits for recorded work over the
             // surface (counted, and named for the [hooksync] line).
+            const auto heldAddress = it->address;
+            const auto heldBytes = it->bytes.size();
             const auto equalsCommitted = [&] {
-                if (Recorder::SnapshotWriteOverlaps(address, bytes)) counters.pendingReads.fetch_add(1, std::memory_order_relaxed);
+                if (Recorder::SnapshotWriteOverlaps(heldAddress, heldBytes)) counters.pendingReads.fetch_add(1, std::memory_order_relaxed);
                 const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::TextureCompare);
-                return GuestMemory::EqualsCommitted(address, it->bytes);
+                return GuestMemory::EqualsCommitted(heldAddress, it->bytes);
             };
-            if (*keys != DccKeys::Uncompressed || GuestMemory::UnchangedSince(address, it->bytes.size(), it->generation) || equalsCommitted()) {
+            if (*keys != DccKeys::Uncompressed || GuestMemory::UnchangedSince(heldAddress, heldBytes, it->generation) || equalsCommitted()) {
                 it->generation = generation;
                 touchTexture(cache, it);
                 logLookup({it->texture.get(), resource, guestBytes, *keys, generation, nullptr});
@@ -525,7 +530,10 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         }
         eraseTexture(cache, it);
     }
-    CachedTexture entry{key, address, std::vector<std::byte>(source != nullptr ? 0u : bytes), nullptr, *keys, generation};
+    const auto viewed = describeViewed();
+    const auto viewedAddress = address + viewed.guestOffset;
+    const auto viewedBytes = static_cast<std::size_t>(viewed.guestBytes);
+    CachedTexture entry{key, viewedAddress, std::vector<std::byte>(source != nullptr ? 0u : viewedBytes), nullptr, *keys, generation};
     if (source != nullptr) {
         entry.source = source;
         entry.sourceVersion = source->Version();
@@ -534,16 +542,16 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         counters.fromStorage.fetch_add(1, std::memory_order_relaxed);
     } else {
         // Snapshot before the upload so a write racing with it is caught by the next comparison.
-        if (*keys == DccKeys::Uncompressed && Recorder::SnapshotWriteOverlaps(address, bytes)) counters.pendingReads.fetch_add(1, std::memory_order_relaxed);
-        ReadTextureSurface(resource, *keys, entry.bytes);
+        if (*keys == DccKeys::Uncompressed && Recorder::SnapshotWriteOverlaps(viewedAddress, viewedBytes)) counters.pendingReads.fetch_add(1, std::memory_order_relaxed);
+        ReadTextureSurface(resource, *keys, entry.bytes, viewed.guestOffset);
         static const bool traceTextures = std::getenv("APS5_TRACE_TEXTURES") != nullptr;
         if (traceTextures) {
             std::size_t nonzero = 0;
             for (std::size_t i = 0; i < entry.bytes.size(); i += 64) nonzero += entry.bytes[i] != std::byte{0};
-            std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d: %zu of %zu sampled bytes nonzero\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), nonzero, entry.bytes.size() / 64);
+            std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d levels %u..%u of %u (min lod %u/256): %zu of %zu sampled bytes nonzero, %llu of %llu guest bytes viewed\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), viewed.first, viewed.first + viewed.count - 1u, resource.mipCount, resource.minLod, nonzero, entry.bytes.size() / 64, static_cast<unsigned long long>(viewed.guestBytes), static_cast<unsigned long long>(guestBytes));
         }
         const auto room = sampledBudget(context, cache);
-        while (!cache.entries.empty() && cache.bytes + bytes > room) eraseTexture(cache, std::prev(cache.entries.end()));
+        while (!cache.entries.empty() && cache.bytes + viewedBytes > room) eraseTexture(cache, std::prev(cache.entries.end()));
         const auto makeSnapshot = [&] { return std::make_shared<Texture>(context, *context.detiler, resource, components, entry.bytes, depthCompare); };
         try {
             entry.texture = makeSnapshot();

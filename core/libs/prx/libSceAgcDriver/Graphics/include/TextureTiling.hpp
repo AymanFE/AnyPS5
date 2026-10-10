@@ -76,6 +76,17 @@ struct SurfaceGeometry {
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor);
 bool LevelsFitAllocation(const GuestTextureResource& surface, std::uint32_t levels);
 
+struct ViewedLevels {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+    std::uint64_t guestOffset = 0;
+    std::uint64_t guestBytes = 0;
+    std::uint64_t linearOffset = 0;
+    std::uint64_t linearBytes = 0;
+    bool whole = true;
+};
+ViewedLevels DescribeViewedLevels(const GuestTextureResource& descriptor, const SurfaceGeometry& geometry);
+
 }
 
 #endif

@@ -6,6 +6,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 namespace AgcDriver::Graphics {
@@ -433,6 +434,44 @@ std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std
     Require(width != 0 && height != 0 && mipCount != 0 && mipCount <= 16u, "invalid surface mip chain");
     if (tileMode == TextureTileMode::kLinear) return ComputeLinearMipLayout(bytesPerElement, 1u, 1u, width, height, mipCount);
     return ComputeTiledMipLayout(tileMode, bytesPerElement, 1u, 1u, width, height, mipCount);
+}
+
+ViewedLevels DescribeViewedLevels(const GuestTextureResource& descriptor, const SurfaceGeometry& geometry) {
+    const auto levels = static_cast<std::uint32_t>(geometry.mips.size());
+    Require(levels != 0, "cannot describe the viewed levels of a surface without mip levels");
+    const auto last = std::min(descriptor.lastLevel, levels - 1u);
+    const auto first = std::min(descriptor.baseLevel, last);
+    ViewedLevels viewed;
+    viewed.first = first;
+    viewed.count = last - first + 1u;
+    if (first == 0 && last == levels - 1u) {
+        viewed.guestBytes = geometry.guestBytes;
+        viewed.linearBytes = geometry.sliceLinearBytes * geometry.layers;
+        return viewed;
+    }
+    viewed.whole = false;
+    auto guestBegin = std::numeric_limits<std::uint64_t>::max();
+    auto linearBegin = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t guestEnd = 0;
+    std::uint64_t linearEnd = 0;
+    for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+        for (auto level = first; level <= last; ++level) {
+            if (!geometry.HasLayer(level, layer)) continue;
+            const auto& mip = geometry.mips[level];
+            const auto tiled = geometry.GuestLayerOffset(layer) + mip.tiledOffset;
+            const auto linear = geometry.LinearLayerOffset(layer) + mip.linearOffset;
+            guestBegin = std::min(guestBegin, tiled);
+            guestEnd = std::max(guestEnd, tiled + mip.tiledSize);
+            linearBegin = std::min(linearBegin, linear);
+            linearEnd = std::max(linearEnd, linear + mip.linearSize);
+        }
+    }
+    Require(guestBegin < guestEnd && guestEnd <= geometry.guestBytes, "viewed mip levels lie outside the surface");
+    viewed.guestOffset = guestBegin;
+    viewed.guestBytes = guestEnd - guestBegin;
+    viewed.linearOffset = linearBegin;
+    viewed.linearBytes = linearEnd - linearBegin;
+    return viewed;
 }
 
 std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::uint32_t arrayLayers) {
