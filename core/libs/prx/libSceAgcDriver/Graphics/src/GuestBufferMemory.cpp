@@ -2908,6 +2908,13 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferMemory::InPlaceR
     return result;
 }
 
+bool GuestBufferMemory::ReadsInPlace(std::uint64_t address, std::size_t size) const {
+    if (!uploaded || committed) return false;
+    const auto covers = [&](const Region& region) { return region.direct != nullptr && address >= region.begin && address < region.end && size <= region.end - address; };
+    if (space != nullptr && std::any_of(space->base.begin(), space->base.end(), covers)) return true;
+    return std::any_of(regions.begin(), regions.end(), covers);
+}
+
 void GuestBufferMemory::RecordStagingCopies(Recorder& recorder) {
     if (!uploaded || committed) return;
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;

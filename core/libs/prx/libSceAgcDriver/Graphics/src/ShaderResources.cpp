@@ -3246,9 +3246,16 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved) const {
     if (_set == VK_NULL_HANDLE || usesBda) return {};
-    const auto reads = guestMemory.InPlaceReads();
-    auto result = std::make_shared<DrawBindings>();
-    std::vector<std::size_t> selected;
+    thread_local std::vector<std::size_t> selected;
+    thread_local std::vector<VkCopyDescriptorSet> copies;
+    thread_local std::vector<VkDescriptorBufferInfo> infos;
+    thread_local std::vector<VkWriteDescriptorSet> writes;
+    selected.clear();
+    std::shared_ptr<DrawBindings> result;
+    const auto prepared = [&]() -> DrawBindings& {
+        if (result == nullptr) result = std::make_shared<DrawBindings>();
+        return *result;
+    };
     for (std::size_t index = 0; index < allocations.size(); ++index) {
         const auto& item = allocations[index];
         const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
@@ -3260,7 +3267,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
                 if (patch.allocation == index && patch.byte < override->size) bytes[patch.byte] = static_cast<std::byte>(patch.adjustment);
             }
             selected.push_back(index);
-            result->snapshots.push_back({0, std::move(slice.buffer), slice.offset, override->size});
+            prepared().snapshots.push_back({0, std::move(slice.buffer), slice.offset, override->size});
             continue;
         }
         std::uint64_t address = item.address;
@@ -3270,8 +3277,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
             size = override->size;
         } else {
             if (!item.guest || item.written || guestMemory.WritesOverlap(item.address, item.size)) continue;
-            const bool direct = std::any_of(reads.begin(), reads.end(), [&](const auto& range) { return item.address >= range.first && item.address < range.second && item.size <= range.second - item.address; });
-            if (!direct || recorder.PendingWriteOverlaps(item.address, item.size)) continue;
+            if (!guestMemory.ReadsInPlace(item.address, item.size) || recorder.PendingWriteOverlaps(item.address, item.size)) continue;
         }
         const auto begin = address - item.adjustment;
         const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
@@ -3287,34 +3293,36 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
             recorder.KeepDrawSnapshot(begin, bytes, generation, registryGeneration, buffer, Recorder::SnapshotUse::Storage, 0, offset);
         }
         selected.push_back(index);
-        result->snapshots.push_back({begin, std::move(buffer), offset, bytes});
+        prepared().snapshots.push_back({begin, std::move(buffer), offset, bytes});
         CaptureTrace::Log("draw-snapshot batch=%llu address=%llx bytes=%zu", static_cast<unsigned long long>(recorder.Submissions() + 1), static_cast<unsigned long long>(begin), bytes);
     }
-    if (selected.empty()) return {};
+    if (result == nullptr) return {};
     Require(context.descriptorCache != nullptr, "draw snapshots require a descriptor cache");
-    std::map<VkDescriptorType, std::uint32_t> counts;
-    for (const auto& binding : bindings) counts[binding.layout.descriptorType] += binding.layout.descriptorCount;
-    std::vector<VkDescriptorPoolSize> sizes;
-    for (const auto& [type, count] : counts) sizes.push_back({type, count});
-    result->cache = context.descriptorCache;
-    result->allocation = result->cache->Allocate(_layout, sizes);
-    Require(result->allocation.set != VK_NULL_HANDLE, "draw snapshot descriptor allocation failed");
-    std::vector<VkCopyDescriptorSet> copies;
-    for (const auto& binding : bindings) {
-        VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};
-        copy.srcSet = _set;
-        copy.srcBinding = binding.layout.binding;
-        copy.dstSet = result->allocation.set;
-        copy.dstBinding = binding.layout.binding;
-        copy.descriptorCount = binding.layout.descriptorCount;
-        copies.push_back(copy);
+    if (drawPoolSizes.empty()) {
+        std::map<VkDescriptorType, std::uint32_t> counts;
+        for (const auto& binding : bindings) counts[binding.layout.descriptorType] += binding.layout.descriptorCount;
+        for (const auto& [type, count] : counts) drawPoolSizes.push_back({type, count});
+        drawCopies.clear();
+        for (const auto& binding : bindings) {
+            VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET};
+            copy.srcSet = _set;
+            copy.srcBinding = binding.layout.binding;
+            copy.dstBinding = binding.layout.binding;
+            copy.descriptorCount = binding.layout.descriptorCount;
+            drawCopies.push_back(copy);
+        }
     }
+    result->cache = context.descriptorCache;
+    result->allocation = result->cache->Allocate(_layout, drawPoolSizes);
+    Require(result->allocation.set != VK_NULL_HANDLE, "draw snapshot descriptor allocation failed");
+    copies = drawCopies;
+    for (auto& copy : copies) copy.dstSet = result->allocation.set;
     const auto update = context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets");
     update(context.device, 0, nullptr, static_cast<std::uint32_t>(copies.size()), copies.data());
-    std::vector<VkDescriptorBufferInfo> infos;
-    infos.reserve(selected.size());
+    infos.clear();
+    infos.reserve(result->snapshots.size());
     for (const auto& snapshot : result->snapshots) infos.push_back({snapshot.buffer->Handle(), snapshot.offset, snapshot.bytes});
-    std::vector<VkWriteDescriptorSet> writes;
+    writes.clear();
     for (const auto& binding : bindings) {
         for (std::size_t element = 0; element < binding.allocations.size(); ++element) {
             const auto found = std::find(selected.begin(), selected.end(), binding.allocations[element]);
