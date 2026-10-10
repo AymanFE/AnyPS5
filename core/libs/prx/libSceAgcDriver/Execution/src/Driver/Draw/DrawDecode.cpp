@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include <algorithm>
 
 namespace AgcDriver::DriverDetail {
 
@@ -49,6 +50,7 @@ void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const 
             it->second,
             codeOffset
         };
+        result.userCount = userCount;
         for (std::uint32_t i = 0; i < userCount; ++i) {
             Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, userDataBase + i);
             result.userData.push_back((staticAbi ? ReadGraphicsRegister(queue.shader, userDataBase + i) : readUserData(queue.shader, userDataBase + i)));
@@ -67,6 +69,9 @@ void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const 
         };
         const auto initializeMerged = [&](DrawProgram& program, std::uint32_t pointerBase, bool pointerRequired) {
             program.firstUserSgpr = 0;
+            program.userOffset = 8;
+            program.pointerBase = pointerBase;
+            program.pointerRequired = pointerRequired;
             program.userData.insert(program.userData.begin(), 8, 0);
             Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase);
             Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase + 1);
@@ -108,6 +113,26 @@ void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const 
             append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
             programs.back().firstUserSgpr = 0;
         }
+    }
+}
+
+void RefreshProgramUserWords(std::vector<DrawProgram>& programs, const QueueState& queue) {
+    for (auto& program : programs) {
+        require(program.userData.size() == program.userOffset + program.userCount, "draw program user words do not match their layout");
+        std::fill(program.userData.begin(), program.userData.end(), 0u);
+        const auto end = program.userDataBase + program.userCount;
+        for (auto it = queue.shader.lower_bound(program.userDataBase); it != queue.shader.end() && it->first < end; ++it) program.userData[program.userOffset + (it->first - program.userDataBase)] = it->second;
+        if (program.pointerBase == 0) continue;
+        const auto pointerBase = program.pointerBase;
+        if (!program.pointerRequired && !queue.shader.contains(pointerBase) && !queue.shader.contains(pointerBase + 1)) continue;
+        const auto low = ReadGraphicsRegister(queue.shader, pointerBase);
+        const auto high = ReadGraphicsRegister(queue.shader, pointerBase + 1);
+        const auto address = static_cast<std::uint64_t>(low) | (static_cast<std::uint64_t>(high) << 32u);
+        require(address != 0 || !program.pointerRequired, "merged shader user-data address is null");
+        if (address == 0) continue;
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), 8, 4);
+        program.userData[0] = low;
+        program.userData[1] = high;
     }
 }
 

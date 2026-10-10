@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "SceShaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <spirv/unified1/spirv.hpp>
@@ -115,6 +116,50 @@ void Check(AgcDriver::VulkanDevice& device, AgcDriver::Graphics::ShaderPath path
         const auto& actual = draw.programs[index];
         Require(expected.codeOffset == 64u && expected.binary.code.size() == (prepared.roles[index] == ProgramRole::Fragment ? pixelCode.size() : 1u) && expected.binary.code[0] == (prepared.roles[index] == ProgramRole::Fragment ? pixelCode[0] : 0xbf810000u), "graphics entry point did not trim the code prefix");
         Require(expected.binary.stage == actual.binary.stage && expected.firstUserSgpr == actual.firstUserSgpr && expected.userData.size() == actual.userData.size(), "graphics preparation changed the user SGPR ABI");
+    }
+    {
+        const auto frontUsers = tessellation ? 0x10cu : 0x8cu;
+        auto before = queue;
+        before.shader[frontUsers + 1] = 0x11111111u;
+        before.shader[frontUsers + 2] = 0x22222222u;
+        before.shader[0xcu + 4] = 0x44444444u;
+        DrawDecode first{};
+        first.state = prepared.state;
+        first.pixel = prepared.pixel;
+        DecodeGraphicsPrograms(first, before, registry, false, true);
+        const auto key = Driver::drawRegisterKey(before, registry, 7);
+        auto after = before;
+        after.shader[frontUsers + 1] = 0x12345678u;
+        after.shader.erase(frontUsers + 2);
+        after.shader[frontUsers + 9] = 0x9u;
+        after.shader[0xcu + 4] = 0x9abcdef0u;
+        alignas(8) const std::array<std::uint32_t, 2> otherMerged{};
+        const auto otherAddress = reinterpret_cast<std::uintptr_t>(otherMerged.data());
+        if (tessellation || mesh) {
+            after.shader[pointerBase] = static_cast<std::uint32_t>(otherAddress);
+            after.shader[pointerBase + 1u] = static_cast<std::uint32_t>(otherAddress >> 32u);
+        }
+        Require(Driver::drawRegisterKey(after, registry, 7) == key, "user words changed the draw shape key");
+        auto refreshed = first.programs;
+        RefreshProgramUserWords(refreshed, after);
+        DrawDecode fresh{};
+        fresh.state = prepared.state;
+        fresh.pixel = prepared.pixel;
+        DecodeGraphicsPrograms(fresh, after, registry, false, true);
+        Require(fresh.programs.size() == refreshed.size(), "the user-word refresh changed the program count");
+        bool changed = false;
+        for (std::size_t index = 0; index < refreshed.size(); ++index) {
+            Require(fresh.programs[index].userData == refreshed[index].userData, "refreshed user words differ from a fresh decode's");
+            Require(refreshed[index].userCount == fresh.programs[index].userCount && refreshed[index].userOffset == fresh.programs[index].userOffset && refreshed[index].pointerBase == fresh.programs[index].pointerBase, "the user-word layout differs from a fresh decode's");
+            changed = changed || refreshed[index].userData != first.programs[index].userData;
+        }
+        Require(changed, "the user-word refresh saw no change");
+        auto resized = before;
+        resized.shader[tessellation ? 0x10bu : 0x8bu] = 15u << 1u;
+        Require(Driver::drawRegisterKey(resized, registry, 7) != key, "the user SGPR count left the draw shape key");
+        auto moved = before;
+        moved.context[0x8e] = 0x7u;
+        Require(Driver::drawRegisterKey(moved, registry, 7) != key, "a context register left the draw shape key");
     }
     auto target = device.Target();
     std::vector<std::uint32_t> capabilities(target.supportedCapabilities.begin(), target.supportedCapabilities.end());

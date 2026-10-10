@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -82,18 +83,24 @@ ShaderRecompiler::RecompileResult Driver::materializeDrawStage(std::size_t i, st
     return result;
 }
 
-void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawParameters& drawParameters, const std::optional<Graphics::IndirectDrawPath>& indirectCpu, const std::vector<DrawProgram>& programs, const std::vector<StageCapture>& stageCaptures, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, const std::vector<std::vector<Graphics::DecodeRead>>& decodeReads, bool verifyHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::uint64_t drawKey, bool registerKey, const std::shared_ptr<const DrawDecode>& decode, DrawPhaseTiming& phaseTiming) {
+void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawParameters& drawParameters, const std::optional<Graphics::IndirectDrawPath>& indirectCpu, const std::vector<DrawProgram>& programs, const std::vector<StageCapture>& stageCaptures, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, const std::vector<std::vector<Graphics::DecodeRead>>& decodeReads, bool verifyHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::uint64_t drawKey, bool registerKey, const std::shared_ptr<const DrawDecode>& decode, const std::shared_ptr<DrawEntry>& entry, DrawPhaseTiming& phaseTiming) {
     if (useDrawEntries && !drawHit && !(drawParameters.indirect && indirectCpu)) {
         phaseTiming.Phase(DrawRowVectors);
-        std::uint64_t unstable = 0, mismatches = 0;
+        std::uint64_t unstable = 0, mismatches = 0, skipped = 0;
+        const bool objectDraw = registerKey && !drawKeyUserWords() && !verifyHit && entry != nullptr && entry->stages.size() == programs.size();
         for (std::size_t i = 0; i < programs.size(); ++i) {
             const auto& stageCapture = stageCaptures[i];
             if (stageCapture.compiled == nullptr || !CacheableResult(*stageCapture.compiled)) continue;
+            if (objectDraw && entry->stages[i].size() >= dispatchVariants() && std::any_of(entry->stages[i].begin(), entry->stages[i].end(), [&](const std::shared_ptr<DispatchVariant>& kept) { return kept->pushOffset == stageCapture.pushOffset; })) {
+                ++skipped;
+                continue;
+            }
             auto variant = std::make_shared<DispatchVariant>();
             variant->compiled = stageCapture.compiled;
             variant->shader = programs[i].snapshot;
             variant->forgetSerial = stageCapture.forgetSerial;
             variant->pushOffset = stageCapture.pushOffset;
+            variant->userData = programs[i].userData;
             if (vertexInfos[i]) variant->vertexInfo = std::make_shared<const ShaderRecompiler::ShaderVertexStageInfo>(*vertexInfos[i]);
 
             std::vector<ShaderRecompiler::MemoryRegion> regions(stageCapture.regions.begin(), stageCapture.regions.end());
@@ -120,7 +127,8 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
             }
             fresh[i] = std::move(variant);
         }
-        insertDrawEntry(drawKey, fresh, registerKey ? decode : nullptr);
+        if (objectDraw && std::all_of(fresh.begin(), fresh.end(), [](const std::shared_ptr<DispatchVariant>& variant) { return variant == nullptr; })) touchDrawEntry(drawKey, entry, skipped);
+        else insertDrawEntry(drawKey, fresh, registerKey ? decode : nullptr);
         if (unstable != 0 || mismatches != 0) {
             std::lock_guard cacheLock(drawCacheMutex);
             drawEntryCounters.unstable += unstable;

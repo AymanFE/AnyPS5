@@ -8,12 +8,14 @@ namespace AgcDriver::DriverDetail {
 
 std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegistry& registry, std::uint64_t deviceSerial) {
     static const bool allUserWords = std::getenv("APS5_DRAW_KEY_ALL_USER_WORDS") != nullptr;
+    const bool shape = !drawKeyUserWords();
     std::uint64_t key = 0xcbf29ce484222325ull;
     const auto mix = [&](std::uint64_t value) {
         key ^= value;
         key *= 0x100000001b3ull;
     };
     const auto userEnd = [&](std::uint32_t base) {
+        if (shape) return base;
         if (allUserWords) return base + 32u;
         const auto resources = queue.shader.find(base - 1);
         if (resources == queue.shader.end()) return base;
@@ -22,6 +24,7 @@ std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegis
     };
     const std::array<std::pair<std::uint32_t, std::uint32_t>, 3> users{{{0x00cu, userEnd(0x00cu)}, {0x08cu, userEnd(0x08cu)}, {0x10cu, userEnd(0x10cu)}}};
     const auto unread = [&](std::uint32_t offset) {
+        if (shape && (offset == 0x082u || offset == 0x083u || offset == 0x102u || offset == 0x103u)) return true;
         return std::any_of(users.begin(), users.end(), [&](const auto& user) { return offset >= user.second && offset < user.first + 32u; });
     };
     mix(deviceSerial);
@@ -103,7 +106,7 @@ bool Driver::sameDecode(const DrawDecode& a, const DrawDecode& b) {
     for (std::size_t i = 0; i < a.programs.size(); ++i) {
         const auto& x = a.programs[i];
         const auto& y = b.programs[i];
-        if (x.binary.stage != y.binary.stage || x.binary.codeAddress != y.binary.codeAddress || x.userDataBase != y.userDataBase || x.firstUserSgpr != y.firstUserSgpr || x.userData != y.userData || x.snapshot != y.snapshot || x.codeOffset != y.codeOffset) return false;
+        if (x.binary.stage != y.binary.stage || x.binary.codeAddress != y.binary.codeAddress || x.userDataBase != y.userDataBase || x.firstUserSgpr != y.firstUserSgpr || x.userData.size() != y.userData.size() || x.userCount != y.userCount || x.userOffset != y.userOffset || x.pointerBase != y.pointerBase || x.snapshot != y.snapshot || x.codeOffset != y.codeOffset) return false;
     }
     return true;
 }

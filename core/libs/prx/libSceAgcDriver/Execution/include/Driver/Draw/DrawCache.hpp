@@ -23,6 +23,10 @@ struct DrawProgram {
 
     std::shared_ptr<const ShaderSnapshot> snapshot;
     std::size_t codeOffset = 0;
+    std::uint32_t userCount = 0;
+    std::uint32_t userOffset = 0;
+    std::uint32_t pointerBase = 0;
+    bool pointerRequired = false;
 };
 
 struct DrawDecode {
@@ -33,6 +37,7 @@ struct DrawDecode {
 };
 
 void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const ShaderRegistry& registry, bool staticAbi, bool includeFragment);
+void RefreshProgramUserWords(std::vector<DrawProgram>& programs, const QueueState& queue);
 
 struct PreparedGraphicsStage {
     std::shared_ptr<const ShaderSnapshot> snapshot;
@@ -68,6 +73,7 @@ struct DrawEntryCounters {
     double validateUs = 0;
 
     std::uint64_t registerKeyLookups = 0, registerKeyHits = 0, decodeSkipped = 0, decodePartial = 0, facadeMismatches = 0, verifyDecodes = 0, verifyDecodeMismatches = 0;
+    std::uint64_t userWordMisses = 0, userWordComparisons = 0, objectDraws = 0, objectInsertsSkipped = 0;
     double keyUs = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };

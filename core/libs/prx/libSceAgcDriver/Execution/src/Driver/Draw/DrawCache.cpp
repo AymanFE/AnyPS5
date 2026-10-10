@@ -31,6 +31,11 @@ bool Driver::registerKeyEnabled() {
     return registerKey;
 }
 
+bool Driver::drawKeyUserWords() {
+    static const bool userWords = std::getenv("APS5_DRAW_KEY_USER_WORDS") != nullptr;
+    return userWords;
+}
+
 bool Driver::verifyDrawRecipe() {
     static const bool verify = std::getenv("APS5_VERIFY_DRAW_RECIPE") != nullptr;
     return verify;
@@ -71,7 +76,7 @@ void Driver::insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<Disp
     for (std::size_t i = 0; i < fresh.size(); ++i) {
         if (fresh[i] == nullptr) continue;
         auto& variants = replacement->stages[i];
-        const auto present = std::find_if(variants.begin(), variants.end(), [&](const std::shared_ptr<DispatchVariant>& kept) { return kept->pushOffset == fresh[i]->pushOffset && kept->runs == fresh[i]->runs && kept->words == fresh[i]->words; });
+        const auto present = std::find_if(variants.begin(), variants.end(), [&](const std::shared_ptr<DispatchVariant>& kept) { return kept->pushOffset == fresh[i]->pushOffset && kept->userData == fresh[i]->userData && kept->runs == fresh[i]->runs && kept->words == fresh[i]->words; });
         if (present != variants.end()) {
             ++counters.present;
             fresh[i] = *present;
@@ -104,6 +109,20 @@ void Driver::insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<Disp
         drawOrder.erase(last->second->order);
         drawCache.erase(last);
         ++drawCacheEvictions;
+    }
+}
+
+void Driver::touchDrawEntry(std::uint64_t key, const std::shared_ptr<DrawEntry>& entry, std::uint64_t skippedInserts) {
+    std::lock_guard cacheLock(drawCacheMutex);
+    ++drawEntryCounters.objectDraws;
+    drawEntryCounters.objectInsertsSkipped += skippedInserts;
+    ++drawCacheHits;
+    const auto found = drawCache.find(key);
+    if (found == drawCache.end() || found->second != entry) return;
+    if (drawCacheHits - entry->touched > drawCacheEntries() / 8) {
+        drawOrder.splice(drawOrder.begin(), drawOrder, entry->order);
+        entry->touched = drawCacheHits;
+        ++drawEntryCounters.touches;
     }
 }
 
