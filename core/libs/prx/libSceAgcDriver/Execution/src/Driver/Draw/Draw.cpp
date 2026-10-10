@@ -353,6 +353,13 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         recipe = findDrawRecipe(drawKey, recipeStages);
         if (recipe == nullptr) VulkanDevice::NoteDrawRecipeMiss(VulkanDevice::DrawRecipePrecheck::NoRecipe);
     }
+    const bool objectRecipe = recipe == nullptr && recipeStages.empty() && registerKey && !drawParameters.indirect && !drawKeyUserWords() && entry != nullptr && Graphics::DrawRecipes() && objectRecipeEntries() != 0;
+    std::uint64_t objectKey = 0;
+    std::vector<std::uint32_t> objectWords;
+    if (objectRecipe) {
+        objectKey = objectRecipeKey(drawKey, programs, objectWords);
+        recipe = findObjectRecipe(objectKey, drawKey, objectWords);
+    }
     if (recipe == nullptr) {
         if (auto known = localDevice->KnownDrawRejection(graphics, stages)) {
             rejected = std::move(*known);
@@ -372,9 +379,11 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         VulkanDevice::NoteRecipe(VulkanDevice::RecipeEvent::Restart, VulkanDevice::RecipeKind::Draw);
     }
     std::shared_ptr<const DrawRecipe> built;
-    localDevice->Draw(graphics, drawParameters, stages, snapshots, recipeStages.empty() ? nullptr : &built);
+    localDevice->Draw(graphics, drawParameters, stages, snapshots, recipeStages.empty() && !objectRecipe ? nullptr : &built);
     phaseTiming.Phase(DrawRowGraphics);
-    if (built != nullptr) attachDrawRecipe(drawKey, recipeStages, std::move(built));
+    if (built != nullptr && !recipeStages.empty()) attachDrawRecipe(drawKey, recipeStages, std::move(built));
+    else if (built != nullptr) attachObjectRecipe(objectKey, drawKey, std::move(objectWords), std::move(built));
+    else if (objectRecipe && recipe != nullptr) dropObjectRecipe(objectKey);
     timing.Mark("draw_and_resource_release");
     return drawn();
 }

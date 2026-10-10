@@ -111,6 +111,11 @@ private:
     void insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::shared_ptr<const DrawDecode> decode);
     std::shared_ptr<const DrawRecipe> findDrawRecipe(std::uint64_t key, const std::vector<std::shared_ptr<DispatchVariant>>& stages);
     void attachDrawRecipe(std::uint64_t key, const std::vector<std::shared_ptr<DispatchVariant>>& stages, std::shared_ptr<const DrawRecipe> recipe);
+    static std::size_t objectRecipeEntries();
+    static std::uint64_t objectRecipeKey(std::uint64_t drawKey, const std::vector<DrawProgram>& programs, std::vector<std::uint32_t>& words);
+    std::shared_ptr<const DrawRecipe> findObjectRecipe(std::uint64_t key, std::uint64_t drawKey, const std::vector<std::uint32_t>& words);
+    void attachObjectRecipe(std::uint64_t key, std::uint64_t drawKey, std::vector<std::uint32_t> words, std::shared_ptr<const DrawRecipe> recipe);
+    void dropObjectRecipe(std::uint64_t key);
     void reportDrawCache(DrawEntryCounters& counters);
     static bool sameVertexInfo(const ShaderRecompiler::ShaderVertexStageInfo& a, const ShaderRecompiler::ShaderVertexStageInfo& b);
     static bool sameDecode(const DrawDecode& a, const DrawDecode& b);
@@ -267,6 +272,8 @@ private:
 
     std::unordered_map<std::uint64_t, std::shared_ptr<DrawEntry>> drawCache;
     std::list<std::uint64_t> drawOrder;
+    std::unordered_map<std::uint64_t, ObjectRecipeRecord> objectRecipes;
+    std::list<std::uint64_t> objectRecipeOrder;
     std::mutex drawCacheMutex;
     std::uint64_t drawCacheHits = 0, drawCacheEvictions = 0, drawCacheVariants = 0, drawCacheVariantBytes = 0;
 

@@ -141,6 +141,65 @@ std::shared_ptr<const DrawRecipe> Driver::findDrawRecipe(std::uint64_t key, cons
     return nullptr;
 }
 
+std::size_t Driver::objectRecipeEntries() {
+    static const std::size_t entries = [] {
+        const char* text = std::getenv("APS5_OBJECT_RECIPES");
+        return text != nullptr ? static_cast<std::size_t>(std::strtoull(text, nullptr, 10)) : std::size_t{16384};
+    }();
+    return entries;
+}
+
+std::uint64_t Driver::objectRecipeKey(std::uint64_t drawKey, const std::vector<DrawProgram>& programs, std::vector<std::uint32_t>& words) {
+    words.clear();
+    for (const auto& program : programs) {
+        words.push_back(static_cast<std::uint32_t>(program.userData.size()));
+        words.insert(words.end(), program.userData.begin(), program.userData.end());
+    }
+    std::uint64_t hash = (drawKey ^ 14695981039346656037ull) * 1099511628211ull;
+    for (const auto word : words) hash = (hash ^ word) * 1099511628211ull;
+    return hash;
+}
+
+std::shared_ptr<const DrawRecipe> Driver::findObjectRecipe(std::uint64_t key, std::uint64_t drawKey, const std::vector<std::uint32_t>& words) {
+    std::lock_guard cacheLock(drawCacheMutex);
+    const auto found = objectRecipes.find(key);
+    if (found == objectRecipes.end() || found->second.drawKey != drawKey || found->second.words != words) {
+        ++drawEntryCounters.objectRecipeMisses;
+        return nullptr;
+    }
+    objectRecipeOrder.splice(objectRecipeOrder.begin(), objectRecipeOrder, found->second.order);
+    ++drawEntryCounters.objectRecipeHits;
+    return found->second.recipe;
+}
+
+void Driver::attachObjectRecipe(std::uint64_t key, std::uint64_t drawKey, std::vector<std::uint32_t> words, std::shared_ptr<const DrawRecipe> recipe) {
+    std::lock_guard cacheLock(drawCacheMutex);
+    ++drawEntryCounters.objectRecipeAttached;
+    if (const auto found = objectRecipes.find(key); found != objectRecipes.end()) {
+        found->second.drawKey = drawKey;
+        found->second.words = std::move(words);
+        found->second.recipe = std::move(recipe);
+        objectRecipeOrder.splice(objectRecipeOrder.begin(), objectRecipeOrder, found->second.order);
+    } else {
+        objectRecipeOrder.push_front(key);
+        objectRecipes.emplace(key, ObjectRecipeRecord{drawKey, std::move(words), std::move(recipe), objectRecipeOrder.begin()});
+    }
+    while (objectRecipes.size() > objectRecipeEntries()) {
+        objectRecipes.erase(objectRecipeOrder.back());
+        objectRecipeOrder.pop_back();
+    }
+    VulkanDevice::NoteRecipe(VulkanDevice::RecipeEvent::Attach, VulkanDevice::RecipeKind::Draw);
+}
+
+void Driver::dropObjectRecipe(std::uint64_t key) {
+    std::lock_guard cacheLock(drawCacheMutex);
+    ++drawEntryCounters.objectRecipeRestarts;
+    const auto found = objectRecipes.find(key);
+    if (found == objectRecipes.end()) return;
+    objectRecipeOrder.erase(found->second.order);
+    objectRecipes.erase(found);
+}
+
 void Driver::attachDrawRecipe(std::uint64_t key, const std::vector<std::shared_ptr<DispatchVariant>>& stages, std::shared_ptr<const DrawRecipe> recipe) {
     std::shared_ptr<DrawEntry> entry;
     {

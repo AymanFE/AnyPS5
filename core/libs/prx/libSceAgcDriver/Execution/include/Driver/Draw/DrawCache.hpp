@@ -53,6 +53,13 @@ struct DrawRecipeRecord {
     bool Expired() const;
 };
 
+struct ObjectRecipeRecord {
+    std::uint64_t drawKey;
+    std::vector<std::uint32_t> words;
+    std::shared_ptr<const DrawRecipe> recipe;
+    std::list<std::uint64_t>::iterator order;
+};
+
 struct DrawEntry {
 
     std::shared_ptr<const DrawDecode> decode;
@@ -74,6 +81,7 @@ struct DrawEntryCounters {
 
     std::uint64_t registerKeyLookups = 0, registerKeyHits = 0, decodeSkipped = 0, decodePartial = 0, facadeMismatches = 0, verifyDecodes = 0, verifyDecodeMismatches = 0;
     std::uint64_t userWordMisses = 0, userWordComparisons = 0, objectDraws = 0, objectInsertsSkipped = 0;
+    std::uint64_t objectRecipeHits = 0, objectRecipeMisses = 0, objectRecipeAttached = 0, objectRecipeRestarts = 0;
     double keyUs = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
