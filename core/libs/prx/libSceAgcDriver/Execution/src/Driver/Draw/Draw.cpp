@@ -145,11 +145,12 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     ShaderMemory shaderMemory(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter());
     std::vector<ShaderRecompiler::RecompileResult> results;
     std::vector<Graphics::CompiledShader> stages;
-    results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
-    stages.reserve(programs.size());
+    results.reserve(graphics.rectList ? 2u : 0u);
+    stages.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
     std::uint32_t pushCursorBytes = 0;
 
     std::vector<const ShaderRecompiler::RecompileResult*> programResults(programs.size(), nullptr);
+    std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> held(programs.size());
 
     std::vector<StageCapture> stageCaptures(programs.size());
     std::vector<std::shared_ptr<DispatchVariant>> matched(programs.size());
@@ -194,21 +195,19 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
 
     std::optional<Graphics::IndirectDrawPath> indirectCpu;
     std::vector<std::uint32_t> pushOffsets(programs.size(), 0);
-    std::vector<std::size_t> resultIndex(programs.size(), 0);
     for (std::size_t i = 0; i < programs.size(); ++i) {
         if (roles[i] == Role::GeometryBack) continue;
         const auto& program = programs[i];
         pushOffsets[i] = pushCursorBytes;
         if (drawHit) {
 
-            programResults[i] = matched[i]->compiled.get();
+            held[i] = matched[i]->compiled;
             memory.insert(memory.end(), matchedRegions[i].begin(), matchedRegions[i].end());
         } else {
-            resultIndex[i] = results.size();
-            results.push_back(materializeDrawStage(i, pushCursorBytes, queue, submission, programs, graphics, pixel, vertexInfos, memory, linked, drawParameters, localDevice, shaderMemory, stageCaptures, recompiled, drawHit, matched, matchedRegions, profile, dumpTarget, dumpSlot1, captures, phaseTiming, phaseMs, rejected));
+            held[i] = materializeDrawStage(i, pushCursorBytes, queue, submission, programs, graphics, pixel, vertexInfos, memory, linked, drawParameters, localDevice, shaderMemory, stageCaptures, recompiled, drawHit, matched, matchedRegions, profile, dumpTarget, dumpSlot1, captures, phaseTiming, phaseMs, rejected);
             if (!rejected.empty()) return DrawVerdict::Rejected;
-            programResults[i] = &results.back();
         }
+        programResults[i] = held[i].get();
         const auto& result = *programResults[i];
         if (i == 0 && drawParameters.indirect) {
             indirectCpu = classifyIndirectDraw(result, graphics, programs.front(), localDevice, drawParameters, traceIndirect);
@@ -216,7 +215,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             fold(result, drawParameters);
         }
         require(result.pushConstants.size() <= Graphics::PipelinePushConstantBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
-        stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushCursorBytes});
+        stages.push_back({program.binary.stage, programResults[i], result.pushConstants.empty() ? 0u : pushCursorBytes});
         pushCursorBytes += static_cast<std::uint32_t>(result.pushConstants.size());
     }
 
@@ -278,18 +277,6 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     if (drawParameters.indirect && indirectCpu) {
 
         const auto indirect = *drawParameters.indirect;
-        if (drawHit) {
-
-            for (std::size_t i = 0; i < programs.size(); ++i) {
-                if (programResults[i] == nullptr) continue;
-                resultIndex[i] = results.size();
-                results.push_back(ShaderRecompiler::RecompileResult(*programResults[i]));
-                for (auto& stage : stages) {
-                    if (stage.program == programResults[i]) stage.program = &results[resultIndex[i]];
-                }
-                programResults[i] = &results[resultIndex[i]];
-            }
-        }
         recordQueuedLabelsBeforeRead(submission.queue);
         const auto readStart = std::chrono::steady_clock::now();
         const auto count = std::min(indirect.countIndirect ? Pm4::ReadDrawCount(indirect) : indirect.count, indirect.count);
@@ -327,12 +314,16 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
                 patched.insert(0);
             }
             for (const auto programIndex : patched) {
-                auto& result = results[resultIndex[programIndex]];
-                const auto pushBytes = result.pushConstants.size();
+                const auto* previous = programResults[programIndex];
+                const auto pushBytes = previous->pushConstants.size();
                 decodeVertexInfo(programIndex);
-                result = materializeDrawStage(programIndex, pushOffsets[programIndex], queue, submission, programs, graphics, pixel, vertexInfos, memory, linked, drawParameters, localDevice, shaderMemory, stageCaptures, recompiled, drawHit, matched, matchedRegions, profile, dumpTarget, dumpSlot1, captures, phaseTiming, phaseMs, rejected);
+                held[programIndex] = materializeDrawStage(programIndex, pushOffsets[programIndex], queue, submission, programs, graphics, pixel, vertexInfos, memory, linked, drawParameters, localDevice, shaderMemory, stageCaptures, recompiled, drawHit, matched, matchedRegions, profile, dumpTarget, dumpSlot1, captures, phaseTiming, phaseMs, rejected);
                 if (!rejected.empty()) return DrawVerdict::Rejected;
-                require(result.pushConstants.size() == pushBytes, "patched program changed its push constant layout");
+                programResults[programIndex] = held[programIndex].get();
+                for (auto& stage : stages) {
+                    if (stage.program == previous) stage.program = programResults[programIndex];
+                }
+                require(programResults[programIndex]->pushConstants.size() == pushBytes, "patched program changed its push constant layout");
             }
             fold(*programResults[0], direct);
             if (graphics.rectList && patched.contains(0)) buildRectList();
