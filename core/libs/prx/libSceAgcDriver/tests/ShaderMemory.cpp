@@ -110,27 +110,34 @@ void verifyRegisterSources() {
 
 void verifyEvaluatedValues() {
     using namespace ShaderRecompiler;
+    using Lookup = Detail::EvaluatedValues::Lookup;
     std::vector<std::unique_ptr<IrValue>> values;
     for (std::uint32_t id = 0; id < 1000u; id++) {
         values.push_back(std::make_unique<IrValue>(IrOpcode::Void, IrType::U32, id));
     }
     Detail::EvaluatedValues table;
     std::uint64_t found = 0;
-    require(!table.Find(values.front().get(), found), "evaluated values: an empty table found a value");
+    require(table.Find(values.front().get(), found) == Lookup::Absent, "evaluated values: an empty table found a value");
     for (std::uint32_t id = 0; id < values.size(); id++) {
-        table.Insert(values[id].get(), std::uint64_t{id} * 3u);
+        table.Begin(values[id].get());
+        require(table.Find(values[id].get(), found) == Lookup::Pending, "evaluated values: a begun value is not pending");
+        table.Finish(values[id].get(), std::uint64_t{id} * 3u, id % 5u != 4u);
     }
     for (std::uint32_t id = 0; id < values.size(); id++) {
-        require(table.Find(values[id].get(), found) && found == std::uint64_t{id} * 3u, "evaluated values: a value was lost when the table grew");
+        if (id % 5u == 4u) {
+            require(table.Find(values[id].get(), found) == Lookup::Absent, "evaluated values: an abandoned value was found");
+            continue;
+        }
+        require(table.Find(values[id].get(), found) == Lookup::Found && found == std::uint64_t{id} * 3u, "evaluated values: a value was lost when the table grew");
     }
-    table.Insert(values[7].get(), 0u);
-    require(table.Find(values[7].get(), found) && found == 21u, "evaluated values: a second insert replaced the first value");
+    table.Begin(values[4].get());
+    require(table.Find(values[4].get(), found) == Lookup::Pending, "evaluated values: an abandoned value could not be begun again");
+    table.Finish(values[4].get(), 12u, true);
+    require(table.Find(values[4].get(), found) == Lookup::Found && found == 12u, "evaluated values: a value begun again was not stored");
     IrValue absent(IrOpcode::Void, IrType::U32, 1000u);
-    require(!table.Find(&absent, found), "evaluated values: a value that was never inserted was found");
+    require(table.Find(&absent, found) == Lookup::Absent, "evaluated values: a value that was never inserted was found");
 }
 
-// The pure flat slots of a hand-built plan (Detail::ComputePureFlatSlots): a slot is pure unless
-// a descriptor dword, a condition, a uniform value or another slot's address cone reaches it.
 void verifyPureFlatSlots() {
     using namespace ShaderRecompiler;
     std::vector<std::unique_ptr<IrValue>> values;

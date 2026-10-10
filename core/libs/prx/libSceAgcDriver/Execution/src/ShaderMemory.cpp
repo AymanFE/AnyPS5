@@ -144,15 +144,24 @@ ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> regio
     }
 }
 
+std::vector<std::size_t> ShaderMemory::orderedPages() const {
+    std::vector<std::size_t> order(pages.size());
+    for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return pageBases[a] < pageBases[b]; });
+    return order;
+}
+
 ShaderMemory::Page& ShaderMemory::page(std::uint64_t base) {
     if (base == lastBase) return *lastPage;
-    const auto found = pages.find(base);
-    if (found != pages.end()) {
+    for (std::size_t index = 0; index < pageBases.size(); ++index) {
+        if (pageBases[index] != base) continue;
         lastBase = base;
-        lastPage = &found->second;
-        return found->second;
+        lastPage = pages[index].get();
+        return *lastPage;
     }
-    auto& page = pages[base];
+    pageBases.push_back(base);
+    pages.push_back(std::make_unique<Page>());
+    auto& page = *pages.back();
     lastBase = base;
     lastPage = &page;
     ++CaptureTotals().pages;
@@ -343,7 +352,9 @@ std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
     result.reserve(initial.size() + pages.size());
     auto next = initial.begin();
     // Both maps are ordered by address and never overlap, so a merge keeps the result sorted.
-    for (const auto& [base, page] : pages) {
+    for (const auto index : orderedPages()) {
+        const auto base = pageBases[index];
+        const auto& page = *pages[index];
         while (next != initial.end() && next->first < base) {
             result.push_back({next->first, next->second});
             ++next;
@@ -356,7 +367,9 @@ std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
 
 std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::TakeRecentRegions() {
     std::vector<ShaderRecompiler::MemoryRegion> result;
-    for (auto& [base, page] : pages) {
+    for (const auto index : orderedPages()) {
+        const auto base = pageBases[index];
+        auto& page = *pages[index];
         if (!AnyWord(page.recent)) continue;
         ForEachRun(page.recent, [&](std::size_t first, std::size_t end) { result.push_back({base + first * sizeof(std::uint32_t), std::as_bytes(std::span(page.words).subspan(first, end - first))}); });
         page.recent.fill(0);

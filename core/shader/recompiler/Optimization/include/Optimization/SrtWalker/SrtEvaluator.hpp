@@ -4,6 +4,7 @@
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include "Optimization/SrtWalker.hpp"
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -12,57 +13,82 @@ namespace ShaderRecompiler::Detail {
 
 class EvaluatedValues {
 public:
-    bool Find(const IrValue* key, std::uint64_t& value) const {
-        if (_slots.empty()) {
-            return false;
-        }
+    enum class Lookup { Absent, Pending, Found };
+    EvaluatedValues() : _slots(_inline.data(), _inline.size()) {}
+    EvaluatedValues(const EvaluatedValues&) = delete;
+    EvaluatedValues& operator=(const EvaluatedValues&) = delete;
+    Lookup Find(const IrValue* key, std::uint64_t& value) const {
         for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
             const auto& slot = _slots[index];
             if (slot.key == key) {
-                value = slot.value;
-                return true;
+                if (slot.state == State::Done) {
+                    value = slot.value;
+                    return Lookup::Found;
+                }
+                return slot.state == State::Pending ? Lookup::Pending : Lookup::Absent;
             }
             if (slot.key == nullptr) {
-                return false;
+                return Lookup::Absent;
             }
         }
     }
-    void Insert(const IrValue* key, std::uint64_t value) {
+    void Begin(const IrValue* key) {
         if ((_count + 1u) * 2u > _slots.size()) {
             Grow();
         }
         for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
             auto& slot = _slots[index];
             if (slot.key == key) {
+                slot.state = State::Pending;
                 return;
             }
             if (slot.key == nullptr) {
-                slot = {key, value};
+                slot = {key, 0, State::Pending};
                 ++_count;
+                return;
+            }
+        }
+    }
+    void Finish(const IrValue* key, std::uint64_t value, bool evaluated) {
+        for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
+            auto& slot = _slots[index];
+            if (slot.key == key) {
+                slot.value = value;
+                slot.state = evaluated ? State::Done : State::Abandoned;
+                return;
+            }
+            if (slot.key == nullptr) {
                 return;
             }
         }
     }
 
 private:
+    enum class State : std::uint8_t { Pending, Done, Abandoned };
     struct Slot {
         const IrValue* key = nullptr;
         std::uint64_t value = 0;
+        State state = State::Pending;
     };
     std::size_t Home(const IrValue* key) const {
         return static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(key) >> 4u) * 0x9e3779b97f4a7c15ull >> 32u) & (_slots.size() - 1u);
     }
     void Grow() {
-        std::vector<Slot> previous(_slots.empty() ? 64u : _slots.size() * 2u);
-        previous.swap(_slots);
+        std::vector<Slot> grown(_slots.size() * 2u);
+        const std::span<Slot> previous = _slots;
+        _heap.swap(grown);
+        _slots = std::span<Slot>(_heap.data(), _heap.size());
         _count = 0;
         for (const auto& slot : previous) {
-            if (slot.key != nullptr) {
-                Insert(slot.key, slot.value);
-            }
+            if (slot.key == nullptr) continue;
+            Begin(slot.key);
+            Finish(slot.key, slot.value, slot.state == State::Done);
+            if (slot.state == State::Pending) Begin(slot.key);
         }
     }
-    std::vector<Slot> _slots;
+    std::array<Slot, 64> _inline{};
+    std::vector<Slot> _heap;
+    std::span<Slot> _slots;
     std::size_t _count = 0;
 };
 
@@ -96,7 +122,6 @@ private:
     IrValue* _activeMask = nullptr;
     InaccessibleRead* _inaccessible = nullptr;
     EvaluatedValues _cache;
-    std::vector<IrValue*> _visiting;
 };
 
 }

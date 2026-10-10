@@ -42,22 +42,20 @@ bool Evaluator::EvaluateWide(IrValue* raw, std::uint64_t& result) {
     if (_activeMask != nullptr && IsRuntimeSelect(inst->Opcode()) && inst->ArgumentCount() == 3 && inst->Argument(0)->Resolve() == _activeMask) {
         return EvaluateWide(inst->Argument(1), result);
     }
-    if (_cache.Find(inst, result)) {
-        return true;
+    switch (_cache.Find(inst, result)) {
+        case EvaluatedValues::Lookup::Found: return true;
+        case EvaluatedValues::Lookup::Pending: return false;
+        case EvaluatedValues::Lookup::Absent: break;
     }
-    if (std::find(_visiting.begin(), _visiting.end(), inst) != _visiting.end()) {
-        return false;
-    }
-    _visiting.push_back(inst);
+    _cache.Begin(inst);
     std::uint64_t out = 0;
     const bool evaluated = EvaluateInst(*inst, out);
-    _visiting.pop_back();
+    _cache.Finish(inst, out, evaluated);
     if (!evaluated) {
         static const bool debug = std::getenv("APS5_SRT_DEBUG") != nullptr;
         if (debug) std::fprintf(stderr, "[srt] cannot evaluate %s (%zu arguments)\n", std::string(IrOpcodeName(inst->Opcode())).c_str(), inst->ArgumentCount());
         return false;
     }
-    _cache.Insert(inst, out);
     result = out;
     return true;
 }

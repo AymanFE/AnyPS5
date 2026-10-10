@@ -92,9 +92,11 @@ private:
     // Regions given at construction (the registered shader's code and header), referenced as given:
     // the caller keeps them alive for as long as the capture is used.
     std::map<std::uint64_t, std::span<const std::byte>> initial;
-    std::map<std::uint64_t, Page> pages;
+    std::vector<std::uint64_t> pageBases;
+    std::vector<std::unique_ptr<Page>> pages;
     std::uint64_t lastBase = ~std::uint64_t{0};
     Page* lastPage = nullptr;
+    std::vector<std::size_t> orderedPages() const;
     std::uint64_t initialBegin = 0;
     std::uint64_t initialEnd = 0;
     PendingWriteQuery pendingWrite = nullptr;
