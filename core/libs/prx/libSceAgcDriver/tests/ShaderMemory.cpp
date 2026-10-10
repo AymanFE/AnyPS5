@@ -16,6 +16,8 @@
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
@@ -2135,9 +2137,113 @@ void verifyGuardedNullPointers() {
 #endif
 }
 
+void benchmarkCapture(std::size_t iterations) {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture texture;
+    const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
+    const std::array<std::uint32_t, 8> image{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    constexpr std::size_t Objects = 300;
+    static std::array<std::array<std::uint32_t, 64>, Objects> objects;
+    static std::array<std::array<std::uint32_t, 16>, Objects> tables;
+    static std::array<std::array<std::uint32_t, 64>, Objects> buffers;
+    const auto bufferDescriptor = [](const void* data, std::uint32_t bytes) {
+        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(data));
+        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0xfacu};
+    };
+    for (std::size_t object = 0; object < Objects; ++object) {
+        auto& srt = objects[object];
+        auto& table = tables[object];
+        const auto tableAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(table.data()));
+        srt[0] = static_cast<std::uint32_t>(tableAddress);
+        srt[1] = static_cast<std::uint32_t>(tableAddress >> 32u);
+        srt[2] = static_cast<std::uint32_t>(object * 17u);
+        const auto output = bufferDescriptor(buffers[object].data(), 256);
+        std::copy(output.begin(), output.end(), srt.begin() + 4);
+        std::copy(image.begin(), image.end(), srt.begin() + 8);
+        const auto a = bufferDescriptor(buffers[object].data() + 16, 64);
+        const auto b = bufferDescriptor(buffers[object].data() + 32, 64);
+        std::copy(a.begin(), a.end(), table.begin());
+        std::copy(b.begin(), b.end(), table.begin() + 4);
+    }
+    const auto smem = [](std::uint32_t op, std::uint32_t sdata, std::uint32_t sbase, std::uint32_t offset) { return std::array<std::uint32_t, 2>{0xf4000000u | (op << 18u) | (sdata << 6u) | sbase, 0xfa000000u | offset}; };
+    std::vector<std::uint32_t> code;
+    const auto emit = [&](std::initializer_list<std::uint32_t> words) { code.insert(code.end(), words.begin(), words.end()); };
+    const auto emit2 = [&](const std::array<std::uint32_t, 2>& words) { code.insert(code.end(), words.begin(), words.end()); };
+    emit2(smem(1u, 2u, 0u, 0x0u));
+    emit2(smem(0u, 16u, 0u, 0x8u));
+    emit2(smem(2u, 4u, 0u, 0x10u));
+    emit2(smem(3u, 20u, 0u, 0x20u));
+    emit2(smem(2u, 28u, 0u, 0x40u));
+    emit({0xbf8cc07fu});
+    emit2(smem(2u, 8u, 1u, 0x0u));
+    emit2(smem(2u, 12u, 1u, 0x10u));
+    emit({0xbf8cc07fu});
+    emit({0xe0301000u, 0x80020100u});
+    emit({0xe0301000u, 0x80030200u});
+    emit({0xf09c0f08u, 0x00e50300u});
+    emit({0xbf8c3f70u});
+    emit({0x4a020210u});
+    emit({0xe0701000u, 0x80010100u});
+    emit({0xbf810000u});
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    std::array<std::array<std::uint32_t, 2>, Objects> userData{};
+    for (std::size_t object = 0; object < Objects; ++object) {
+        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(objects[object].data()));
+        userData[object] = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u)};
+    }
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, 0x21000u, code, 0, {}};
+    request.context.waveSize = 32u;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData[0];
+    request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+    {
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        request.context.memory = memory.Regions();
+        const auto compiled = Recompile(request, *capture);
+        require(!compiled->spirv.empty(), "benchmark shader did not compile");
+        std::cout << "benchmark shader: " << capture->plan->info.buffers.size() << " buffers, " << capture->plan->info.images.size() << " images, " << capture->plan->info.samplers.size() << " samplers, " << capture->snapshot.flattenedSrt.size() << " flat words, " << capture->readTrace.leaves.size() << " pure leaves, " << memory.Regions().size() << " regions\n";
+    }
+    const auto handle = ResolveSource(request);
+    double captureNs = 0, materializeNs = 0;
+    for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+        request.context.userData = userData[iteration % Objects];
+        request.context.memory = {};
+        const auto started = std::chrono::steady_clock::now();
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request, handle.get());
+        const auto regions = memory.TakeRecentRegions();
+        const auto captured = std::chrono::steady_clock::now();
+        request.context.memory = regions;
+        const auto compiled = Recompile(request, *capture);
+        const auto done = std::chrono::steady_clock::now();
+        captureNs += std::chrono::duration<double, std::nano>(captured - started).count();
+        materializeNs += std::chrono::duration<double, std::nano>(done - captured).count();
+        require(compiled->bindings.size() != 0, "benchmark materialize produced no bindings");
+    }
+    std::cout << "capture " << captureNs / iterations / 1000.0 << " us, materialize " << materializeNs / iterations / 1000.0 << " us per stage over " << iterations << " iterations\n";
+}
+
 int main(int argc, char** argv) {
     try {
         using namespace ShaderRecompiler;
+        if (argc == 3 && std::string_view(argv[1]) == "--benchmark-capture") {
+            benchmarkCapture(std::strtoull(argv[2], nullptr, 10));
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--bindless") {
             verifyBindlessTable();
             std::cout << "Bindless mapping, indexing capabilities and strict validation passed\n";

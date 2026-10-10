@@ -3,7 +3,6 @@
 
 #include "Recompiler.hpp"
 #include <array>
-#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -76,12 +75,14 @@ private:
     static constexpr std::size_t PageBytes = 4096;
     static constexpr std::size_t PageWords = PageBytes / sizeof(std::uint32_t);
 
+    using WordMask = std::array<std::uint64_t, PageWords / 64>;
     struct Page {
         std::array<std::uint32_t, PageWords> words{};
-        std::bitset<PageWords> valid;
-        std::bitset<PageWords> read;
-        std::bitset<PageWords> recent;
+        WordMask valid{};
+        WordMask read{};
+        WordMask recent{};
         bool wordwise = false;
+        bool allValid = false;
     };
 
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
@@ -92,6 +93,10 @@ private:
     // the caller keeps them alive for as long as the capture is used.
     std::map<std::uint64_t, std::span<const std::byte>> initial;
     std::map<std::uint64_t, Page> pages;
+    std::uint64_t lastBase = ~std::uint64_t{0};
+    Page* lastPage = nullptr;
+    std::uint64_t initialBegin = 0;
+    std::uint64_t initialEnd = 0;
     PendingWriteQuery pendingWrite = nullptr;
     PendingWriteObserver observe = nullptr;
     HookWaitCounter hookWaits = nullptr;

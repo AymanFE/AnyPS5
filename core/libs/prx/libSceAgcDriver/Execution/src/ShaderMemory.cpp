@@ -6,6 +6,7 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -87,17 +88,73 @@ void ShaderMemory::SetWaitedMsProvider(WaitedMsProvider provider) {
     waitedMsProvider.store(provider, std::memory_order_release);
 }
 
+namespace {
+
+constexpr std::size_t MaskBits = 64;
+
+bool TestWord(const std::array<std::uint64_t, 16>& mask, std::size_t index) {
+    return (mask[index / MaskBits] >> (index % MaskBits)) & 1u;
+}
+
+void SetWord(std::array<std::uint64_t, 16>& mask, std::size_t index) {
+    mask[index / MaskBits] |= std::uint64_t{1} << (index % MaskBits);
+}
+
+bool AnyWord(const std::array<std::uint64_t, 16>& mask) {
+    return std::any_of(mask.begin(), mask.end(), [](std::uint64_t chunk) { return chunk != 0; });
+}
+
+template <typename Run>
+void ForEachRun(const std::array<std::uint64_t, 16>& mask, Run&& run) {
+    constexpr std::size_t Words = 16 * MaskBits;
+    std::size_t index = 0;
+    while (index < Words) {
+        auto chunk = index / MaskBits;
+        auto bits = mask[chunk] & (~std::uint64_t{0} << (index % MaskBits));
+        while (bits == 0) {
+            if (++chunk == mask.size()) return;
+            bits = mask[chunk];
+        }
+        const auto first = chunk * MaskBits + static_cast<std::size_t>(std::countr_zero(bits));
+        auto clear = ~mask[chunk] & (~std::uint64_t{0} << (first % MaskBits));
+        auto end = Words;
+        while (true) {
+            if (clear != 0) {
+                end = chunk * MaskBits + static_cast<std::size_t>(std::countr_zero(clear));
+                break;
+            }
+            if (++chunk == mask.size()) break;
+            clear = ~mask[chunk];
+        }
+        run(first, end);
+        index = end;
+    }
+}
+
+}
+
 ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> regions, PendingWriteQuery pendingWrite, PendingWriteObserver observe, HookWaitCounter hookWaits) : pendingWrite(pendingWrite), observe(observe), hookWaits(hookWaits) {
     const ShaderRecompiler::RequestMemoryView validated(regions);
     for (const auto& region : regions) {
         initial.emplace(region.guestAddress, region.bytes);
     }
+    if (!initial.empty()) {
+        initialBegin = initial.begin()->first;
+        for (const auto& [address, bytes] : initial) initialEnd = std::max(initialEnd, address + bytes.size());
+    }
 }
 
 ShaderMemory::Page& ShaderMemory::page(std::uint64_t base) {
+    if (base == lastBase) return *lastPage;
     const auto found = pages.find(base);
-    if (found != pages.end()) return found->second;
+    if (found != pages.end()) {
+        lastBase = base;
+        lastPage = &found->second;
+        return found->second;
+    }
     auto& page = pages[base];
+    lastBase = base;
+    lastPage = &page;
     ++CaptureTotals().pages;
     // A page is either mapped whole or read word by word where the guest mapped less than a page,
     // or where recorded GPU work writes into it (a whole-page read would wait for that work).
@@ -110,7 +167,8 @@ ShaderMemory::Page& ShaderMemory::page(std::uint64_t base) {
         const auto started = CaptureProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         GuestMemory::Read(base, std::as_writable_bytes(std::span(page.words)), sizeof(std::uint32_t));
         if (CaptureProfiled()) CaptureTotals().pageReadNanoseconds += NanosecondsSince(started);
-        page.valid.set();
+        page.valid.fill(~std::uint64_t{0});
+        page.allValid = true;
     }
     return page;
 }
@@ -121,7 +179,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         throw std::runtime_error("AGC driver: invalid shader memory read address");
     }
     ++CaptureTotals().reads;
-    if (!self.initial.empty()) {
+    if (!self.initial.empty() && address + sizeof(*value) > self.initialBegin && address < self.initialEnd) {
         const auto next = self.initial.upper_bound(address);
         if (next != self.initial.begin()) {
             const auto previous = std::prev(next);
@@ -136,7 +194,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     }
     auto& page = self.page(address & ~static_cast<std::uint64_t>(PageBytes - 1));
     const auto index = static_cast<std::size_t>((address % PageBytes) / sizeof(*value));
-    if (!page.valid.test(index)) {
+    if (!page.allValid && !TestWord(page.valid, index)) {
         std::uint32_t word = 0;
         auto policy = PendingWrite::Sync;
         if (page.wordwise) {
@@ -193,10 +251,10 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         }
         if (CaptureProfiled()) CaptureTotals().wordReadNanoseconds += NanosecondsSince(fetchStarted);
         page.words[index] = word;
-        page.valid.set(index);
+        SetWord(page.valid, index);
     }
-    page.read.set(index);
-    page.recent.set(index);
+    SetWord(page.read, index);
+    SetWord(page.recent, index);
     *value = page.words[index];
     return true;
 }
@@ -206,18 +264,20 @@ bool ShaderMemory::accessible(void* context, std::uint64_t address, std::uint64_
     if (bytes == 0 || address > std::numeric_limits<std::uint64_t>::max() - bytes) return false;
     const auto end = address + bytes;
     while (address < end) {
-        const auto next = self.initial.upper_bound(address);
-        if (next != self.initial.begin()) {
-            const auto previous = std::prev(next);
-            if (address - previous->first < previous->second.size()) {
-                address = previous->first + previous->second.size();
-                continue;
+        if (!self.initial.empty() && address < self.initialEnd && end > self.initialBegin) {
+            const auto next = self.initial.upper_bound(address);
+            if (next != self.initial.begin()) {
+                const auto previous = std::prev(next);
+                if (address - previous->first < previous->second.size()) {
+                    address = previous->first + previous->second.size();
+                    continue;
+                }
             }
         }
         const auto base = address & ~static_cast<std::uint64_t>(PageBytes - 1);
         const auto pageEnd = std::min<std::uint64_t>(base + PageBytes, end);
         const auto& page = self.page(base);
-        if (!page.wordwise && !page.valid.all() && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), static_cast<std::size_t>(pageEnd - address))) return false;
+        if (!page.wordwise && !page.allValid && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), static_cast<std::size_t>(pageEnd - address))) return false;
         address = pageEnd;
     }
     return true;
@@ -288,15 +348,7 @@ std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
             result.push_back({next->first, next->second});
             ++next;
         }
-        for (std::size_t index = 0; index < PageWords;) {
-            if (!page.read.test(index)) {
-                ++index;
-                continue;
-            }
-            const auto first = index;
-            while (index < PageWords && page.read.test(index)) ++index;
-            result.push_back({base + first * sizeof(std::uint32_t), std::as_bytes(std::span(page.words).subspan(first, index - first))});
-        }
+        ForEachRun(page.read, [&](std::size_t first, std::size_t end) { result.push_back({base + first * sizeof(std::uint32_t), std::as_bytes(std::span(page.words).subspan(first, end - first))}); });
     }
     for (; next != initial.end(); ++next) result.push_back({next->first, next->second});
     return result;
@@ -305,17 +357,9 @@ std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
 std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::TakeRecentRegions() {
     std::vector<ShaderRecompiler::MemoryRegion> result;
     for (auto& [base, page] : pages) {
-        if (page.recent.none()) continue;
-        for (std::size_t index = 0; index < PageWords;) {
-            if (!page.recent.test(index)) {
-                ++index;
-                continue;
-            }
-            const auto first = index;
-            while (index < PageWords && page.recent.test(index)) ++index;
-            result.push_back({base + first * sizeof(std::uint32_t), std::as_bytes(std::span(page.words).subspan(first, index - first))});
-        }
-        page.recent.reset();
+        if (!AnyWord(page.recent)) continue;
+        ForEachRun(page.recent, [&](std::size_t first, std::size_t end) { result.push_back({base + first * sizeof(std::uint32_t), std::as_bytes(std::span(page.words).subspan(first, end - first))}); });
+        page.recent.fill(0);
     }
     return result;
 }
