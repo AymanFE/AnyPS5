@@ -3088,6 +3088,73 @@ void drawInputReuseTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
 }
 
+void unwatchedDrawInputTests(const Context& context) {
+    auto& recorder = *context.recorder;
+    constexpr std::size_t bytes = 65536;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the unwatched draw input block");
+    struct Release {
+        void* block;
+        ~Release() {
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } release{block};
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    if (AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "the unwatched block is watched: in-place draw inputs not tested\n";
+        return;
+    }
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, reinterpret_cast<std::uint64_t>(block), bytes);
+        }
+    } unregister{context, block};
+    if (HostImportFor(context, address, bytes) == nullptr) {
+        std::cout << "host import of the unwatched block refused: in-place draw inputs not tested\n";
+        return;
+    }
+    recorder.Sync();
+    const auto vertices = address + 4096;
+    const auto* import = InPlaceDrawInput(context, vertices, 256, 4);
+    Require(import != nullptr && import->base <= vertices && vertices + 256 <= import->base + import->bytes, "an imported draw input was not bound in place");
+    const auto read = recorder.DescribePendingRead(vertices, 256);
+    Require(read.has_value() && read->kind == Recorder::ReadKind::DrawInput && read->open, "an in-place draw input's read was not noted on the open batch");
+    Require(InPlaceDrawInput(context, vertices + 2, 256, 4) == nullptr, "a draw input misaligned for its format was bound in place");
+    Require(InPlaceDrawInput(context, vertices + 2, 256, 2) != nullptr, "an aligned 16-bit draw input was not bound in place");
+    recorder.NotePendingWrite(address + 8192, 16);
+    Require(InPlaceDrawInput(context, address + 8192, 256, 4) != nullptr && !recorder.PendingWriteOverlaps(address + 8192, 256), "a draw input under a pending GPU write was bound before the write completed");
+    const std::array<std::byte, 4> label{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    recorder.RecordStore(import->buffer, address + 12288 - import->base, label, address + 12288);
+    Require(recorder.QueuedStoreOverlaps(address + 12288, 4), "the label store was not queued");
+    Require(InPlaceDrawInput(context, address + 12288, 256, 4) == nullptr, "a draw input under a queued label store was bound in place");
+    Require(InPlaceDrawInput(context, address + 16384, 256, 4) != nullptr, "a queued label store refused a disjoint draw input");
+    alignas(64) static std::array<std::byte, 256> unregistered{};
+    Require(InPlaceDrawInput(context, reinterpret_cast<std::uint64_t>(unregistered.data()), unregistered.size(), 4) == nullptr, "memory without a host import was bound in place");
+    auto unrecorded = context;
+    unrecorded.recorder = nullptr;
+    Require(InPlaceDrawInput(unrecorded, vertices, 256, 4) == nullptr, "a draw without a recorder bound its input in place");
+    recorder.Sync();
+    Require(!recorder.PendingReadOverlaps(vertices, 256), "an in-place draw input's read outlived its batch");
+}
+
 void drawInputInPlaceTests(const Device& device, Recorder& recorder) {
     auto context = device.GetContext();
     constexpr std::size_t bytes = 65536;
@@ -3122,27 +3189,11 @@ void drawInputInPlaceTests(const Device& device, Recorder& recorder) {
     }
     context.recorder = &recorder;
     recorder.Sync();
-    const auto vertices = address + 4096;
-    const auto* import = InPlaceDrawInput(context, vertices, 256, 4);
-    Require(import != nullptr && import->base <= vertices && vertices + 256 <= import->base + import->bytes, "an imported draw input was not bound in place");
-    const auto read = recorder.DescribePendingRead(vertices, 256);
-    Require(read.has_value() && read->kind == Recorder::ReadKind::DrawInput && read->open, "an in-place draw input's read was not noted on the open batch");
-    Require(InPlaceDrawInput(context, vertices + 2, 256, 4) == nullptr, "a draw input misaligned for its format was bound in place");
-    Require(InPlaceDrawInput(context, vertices + 2, 256, 2) != nullptr, "an aligned 16-bit draw input was not bound in place");
+    Require(!AgcDriver::GuestMemory::Watched(address, bytes) || InPlaceDrawInput(context, address + 4096, 256, 4) == nullptr, "a write-watched draw input was bound in place instead of from a snapshot");
     recorder.NotePendingWrite(address + 8192, 16);
-    Require(InPlaceDrawInput(context, address + 8192, 256, 4) != nullptr && !recorder.PendingWriteOverlaps(address + 8192, 256), "a draw input under a pending GPU write was bound before the write completed");
-    const std::array<std::byte, 4> label{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
-    recorder.RecordStore(import->buffer, address + 12288 - import->base, label, address + 12288);
-    Require(recorder.QueuedStoreOverlaps(address + 12288, 4), "the label store was not queued");
-    Require(InPlaceDrawInput(context, address + 12288, 256, 4) == nullptr, "a draw input under a queued label store was bound in place");
-    Require(InPlaceDrawInput(context, address + 16384, 256, 4) != nullptr, "a queued label store refused a disjoint draw input");
-    alignas(64) static std::array<std::byte, 256> unregistered{};
-    Require(InPlaceDrawInput(context, reinterpret_cast<std::uint64_t>(unregistered.data()), unregistered.size(), 4) == nullptr, "memory without a host import was bound in place");
-    auto unrecorded = context;
-    unrecorded.recorder = nullptr;
-    Require(InPlaceDrawInput(unrecorded, vertices, 256, 4) == nullptr, "a draw without a recorder bound its input in place");
+    Require(!AgcDriver::GuestMemory::Watched(address, bytes) || InPlaceDrawInput(context, address + 8192, 256, 4) != nullptr, "a write-watched draw input under a pending GPU write was not bound in place");
     recorder.Sync();
-    Require(!recorder.PendingReadOverlaps(vertices, 256), "an in-place draw input's read outlived its batch");
+    unwatchedDrawInputTests(context);
     if (!AgcDriver::GuestMemory::Watched(address, bytes)) {
         std::cout << "host imports are compared, not watched: kept highest indices not tested\n";
         return;
