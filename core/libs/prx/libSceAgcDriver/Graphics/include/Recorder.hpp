@@ -66,6 +66,10 @@ public:
     // `timing`): Commands(), RecordStore and Submit end it; CommandsInRenderPass hands a
     // continuing draw the command buffer without ending it.
     bool ContinuesRenderPass(std::uint64_t key) const;
+    // Why a draw could not continue (the [draws] pass accounting): no pass is open, or the open
+    // one was left non-continuable.
+    bool RenderPassOpen() const;
+    bool RenderPassContinuable() const;
     VkCommandBuffer CommandsInRenderPass();
     void LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool continuable, std::function<void(VkCommandBuffer)> afterPass = {});
     // DCC "uncompressed" key stores (DccMetadata.cpp StoreUncompressedOnGpu): queued on the open

@@ -1364,6 +1364,14 @@ bool Recorder::ContinuesRenderPass(std::uint64_t key) const {
     return open != nullptr && open->renderPass.open && open->renderPass.continuable && open->renderPass.key == key;
 }
 
+bool Recorder::RenderPassOpen() const {
+    return open != nullptr && open->renderPass.open;
+}
+
+bool Recorder::RenderPassContinuable() const {
+    return RenderPassOpen() && open->renderPass.continuable;
+}
+
 VkCommandBuffer Recorder::CommandsInRenderPass() {
     Require(open != nullptr && open->renderPass.open, "no render pass is open in the recorder");
     return open->commands;
