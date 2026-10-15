@@ -8166,6 +8166,19 @@ int main(int argc, char** argv) {
             std::cout << "Pending DCC key store tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--sample-dumps-only") {
+            if (device.GetContext().hostImportAlignment == 0) {
+                std::cout << "skipped, host imports are unavailable\n";
+                return 77;
+            }
+            if (!device.GetContext().bufferDeviceAddress) {
+                std::cout << "skipped, the device lacks buffer device addresses\n";
+                return 77;
+            }
+            sampleDumpTests(device, recorder);
+            std::cout << "Occlusion counter dump tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--shadowed-key-stores-only") {
             if (!shadowedKeyStoreTests(device, recorder)) {
                 std::cout << "skipped, the device imports no watched host memory under a unit shadow\n";
