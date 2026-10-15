@@ -1,9 +1,11 @@
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <stdexcept>
 
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
@@ -18,10 +20,22 @@ namespace {
 
 using GuestNewHandler = void (APS5_VABI*)();
 
-GuestNewHandler g_newHandler = nullptr;
+std::atomic<GuestNewHandler> g_newHandler{nullptr};
 
 void* Allocate(std::size_t size) {
-    return ApplicationHeapAllocate_nid_no_patch(size == 0 ? 1 : size);
+    for (;;) {
+        GuestNewHandler handler = nullptr;
+        try {
+            return ApplicationHeapAllocate_nid_no_patch(size == 0 ? 1 : size);
+        } catch (const std::bad_alloc&) {
+            handler = g_newHandler.load();
+            if (handler == nullptr) throw;
+        } catch (const std::length_error&) {
+            handler = g_newHandler.load();
+            if (handler == nullptr) throw std::bad_alloc();
+        }
+        handler();
+    }
 }
 
 }
@@ -52,19 +66,17 @@ int APS5_VABI sprintf_s_nid_postfix(char* buffer, size_t size, const char* forma
 
 // Only the "C" locale exists.
 const char* APS5_VABI setlocale_nid_postfix(int category, const char* locale) {
-    (void)category;
+    if (category < 0 || category > 6) return nullptr;
     if (locale == nullptr || locale[0] == 0 || std::strcmp(locale, "C") == 0 || std::strcmp(locale, "POSIX") == 0) return "C";
     return nullptr;
 }
 
 GuestNewHandler APS5_VABI _ZSt15set_new_handlerPFvvE_nid_postfix(GuestNewHandler handler) {
-    const auto previous = g_newHandler;
-    g_newHandler = handler;
-    return previous;
+    return g_newHandler.exchange(handler);
 }
 
 GuestNewHandler APS5_VABI _ZSt15get_new_handlerv_nid_postfix() {
-    return g_newHandler;
+    return g_newHandler.load();
 }
 
 unsigned char _ZSt7nothrow_nid_postfix = 0;

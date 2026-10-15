@@ -1,7 +1,51 @@
 #ifndef CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_LOGMACROS_HPP
 #define CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_LOGMACROS_HPP
 
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+
+#ifdef __MINGW_PRINTF_FORMAT
+[[gnu::format(__MINGW_PRINTF_FORMAT, 2, 3)]]
+#else
+[[gnu::format(printf, 2, 3)]]
+#endif
+inline int WriteLogLine(std::FILE* stream, const char* format, ...) {
+    char small[1024];
+    std::size_t prefixLength = 0;
+    static const bool timestamps = std::getenv("APS5_LOG_TIMESTAMPS") != nullptr;
+    if (timestamps) {
+        using Clock = std::chrono::steady_clock;
+        static const auto started = Clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count();
+        const auto seconds = static_cast<unsigned long long>(elapsed / 1000000);
+        const auto microseconds = static_cast<unsigned long long>(elapsed % 1000000);
+        const int written = std::snprintf(small, sizeof(small), "[+%llu.%06llu s] ", seconds, microseconds);
+        if (written < 0 || written >= static_cast<int>(sizeof(small))) return -1;
+        prefixLength = static_cast<std::size_t>(written);
+    }
+    std::va_list arguments;
+    va_start(arguments, format);
+    std::va_list again;
+    va_copy(again, arguments);
+    const int length = std::vsnprintf(small + prefixLength, sizeof(small) - prefixLength, format, arguments);
+    va_end(arguments);
+    std::string large;
+    const auto remaining = sizeof(small) - prefixLength;
+    if (length >= static_cast<int>(remaining)) {
+        large.resize(prefixLength + static_cast<std::size_t>(length));
+        if (prefixLength != 0) std::memcpy(large.data(), small, prefixLength);
+        std::vsnprintf(large.data() + prefixLength, large.size() - prefixLength + 1, format, again);
+    }
+    va_end(again);
+    if (length < 0) return length;
+    const auto totalLength = prefixLength + static_cast<std::size_t>(length);
+    std::fwrite(large.empty() ? small : large.data(), 1, totalLength, stream);
+    return std::fflush(stream);
+}
 
 inline const char* TrimNidPostfix(const char* func) {
     return func;
@@ -30,12 +74,10 @@ constexpr const char* BaseName(const char* path) {
 #define _APS5_FILE_ BaseName(__FILE__)
 
 #define _APS5_LOG_IMPL(stream, fmt, ...) \
-(std::fprintf(stream, "[%s:%d %s] " fmt "\n", _APS5_FILE_, __LINE__, TrimNidPostfix(__func__), __VA_ARGS__), \
-std::fflush(stream))
+WriteLogLine(stream, "[%s:%d %s] " fmt "\n", _APS5_FILE_, __LINE__, TrimNidPostfix(__func__), __VA_ARGS__)
 
 #define _APS5_LOG_IMPL_NF(stream, fmt) \
-(std::fprintf(stream, "[%s:%d %s] " fmt "\n", _APS5_FILE_, __LINE__, TrimNidPostfix(__func__)), \
-std::fflush(stream))
+WriteLogLine(stream, "[%s:%d %s] " fmt "\n", _APS5_FILE_, __LINE__, TrimNidPostfix(__func__))
 
 #define APS5_LOG_OUT(fmt, ...) _APS5_LOG_IMPL(stdout, fmt, __VA_ARGS__)
 #define APS5_LOG_ERR(fmt, ...) _APS5_LOG_IMPL(stderr, fmt, __VA_ARGS__)
@@ -60,7 +102,7 @@ _APS5_LOG_IMPL_NF(stdout, fmt); \
 #define APS5_LOG_CHARS_OUT_TIMING(fmt) APS5_LOG_CHARS_OUT_IF(APS5_ENABLE_TIMING_LOG, fmt)
 
 #ifdef APS5_DEBUG_LOG
-#define APS5_LOG_DEBUG(fmt, ...) _APS5_LOG_IMPL(stdout, fmt, __VA_ARGS__)
+#define APS5_LOG_OUT_DEBUG(fmt, ...) _APS5_LOG_IMPL(stdout, fmt, __VA_ARGS__)
 #define APS5_LOG_CHARS_OUT_DEBUG(fmt) _APS5_LOG_IMPL_NF(stdout, fmt)
 #else
 #define APS5_LOG_OUT_DEBUG(fmt, ...) ((void)0)

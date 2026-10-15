@@ -6,7 +6,6 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <stdexcept>
 
 namespace AgcDriver::Graphics {
@@ -117,6 +116,10 @@ bool GetMipTailLayout(TextureTileMode tileMode, const BlockLayout& block, std::u
         case TextureTileMode::kD64KBX:
         case TextureTileMode::kR64KBX:
             out = MakeMipTailLayout(kMipTailThin64KB[index], block.blockWidth >> 1u, block.blockHeight);
+            if (tileMode == TextureTileMode::kZ64KBX && bytesPerElement <= 2u) {
+                out.widthLimit >>= 1u;
+                if (bytesPerElement == 1u) out.heightLimit >>= 1u;
+            }
             return true;
     }
     throw std::runtime_error("AGC graphics: GetMipTailLayout encountered an unknown tile mode");
@@ -261,8 +264,9 @@ std::array<std::uint32_t, 3> ThickBlockExtent(TextureTileMode tileMode, std::uin
     switch (tileMode) {
         case TextureTileMode::kStandard4KB: return {1u << thick4KB[index][0], 1u << thick4KB[index][1], 1u << thick4KB[index][2]};
         case TextureTileMode::kStandard64KB:
-        case TextureTileMode::kS64KBX: return {1u << thick64KB[index][0], 1u << thick64KB[index][1], 1u << thick64KB[index][2]};
-        default: throw std::runtime_error("AGC graphics: thick 3D textures are only supported in SW_4KB_S, SW_64KB_S and SW_64KB_S_X, not in swizzle mode " + std::to_string(EquationSwizzleMode(tileMode)) + " at " + std::to_string(bytesPerElement) + " bytes per element");
+        case TextureTileMode::kS64KBX:
+        case TextureTileMode::kD64KBX: return {1u << thick64KB[index][0], 1u << thick64KB[index][1], 1u << thick64KB[index][2]};
+        default: throw std::runtime_error("AGC graphics: thick 3D textures are only supported in SW_4KB_S, SW_64KB_S, SW_64KB_S_X and SW_64KB_D_X, not in swizzle mode " + std::to_string(EquationSwizzleMode(tileMode)) + " at " + std::to_string(bytesPerElement) + " bytes per element");
     }
 }
 
@@ -378,7 +382,7 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
 
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
     SurfaceGeometry geometry;
-    if (descriptor.dimension == TextureDimension::k3D && (descriptor.tileMode == TextureTileMode::kZ64KBX || descriptor.tileMode == TextureTileMode::kD64KBX || descriptor.tileMode == TextureTileMode::kR64KBX)) {
+    if (descriptor.dimension == TextureDimension::k3D && (descriptor.tileMode == TextureTileMode::kZ64KBX || descriptor.tileMode == TextureTileMode::kR64KBX)) {
         const auto depth = descriptor.depthOrLastArray + 1u;
         geometry.mips = ComputeMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.mipCount);
         geometry.layers = depth;
@@ -434,44 +438,6 @@ std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std
     Require(width != 0 && height != 0 && mipCount != 0 && mipCount <= 16u, "invalid surface mip chain");
     if (tileMode == TextureTileMode::kLinear) return ComputeLinearMipLayout(bytesPerElement, 1u, 1u, width, height, mipCount);
     return ComputeTiledMipLayout(tileMode, bytesPerElement, 1u, 1u, width, height, mipCount);
-}
-
-ViewedLevels DescribeViewedLevels(const GuestTextureResource& descriptor, const SurfaceGeometry& geometry) {
-    const auto levels = static_cast<std::uint32_t>(geometry.mips.size());
-    Require(levels != 0, "cannot describe the viewed levels of a surface without mip levels");
-    const auto last = std::min(descriptor.lastLevel, levels - 1u);
-    const auto first = std::min(descriptor.baseLevel, last);
-    ViewedLevels viewed;
-    viewed.first = first;
-    viewed.count = last - first + 1u;
-    if (first == 0 && last == levels - 1u) {
-        viewed.guestBytes = geometry.guestBytes;
-        viewed.linearBytes = geometry.sliceLinearBytes * geometry.layers;
-        return viewed;
-    }
-    viewed.whole = false;
-    auto guestBegin = std::numeric_limits<std::uint64_t>::max();
-    auto linearBegin = std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t guestEnd = 0;
-    std::uint64_t linearEnd = 0;
-    for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
-        for (auto level = first; level <= last; ++level) {
-            if (!geometry.HasLayer(level, layer)) continue;
-            const auto& mip = geometry.mips[level];
-            const auto tiled = geometry.GuestLayerOffset(layer) + mip.tiledOffset;
-            const auto linear = geometry.LinearLayerOffset(layer) + mip.linearOffset;
-            guestBegin = std::min(guestBegin, tiled);
-            guestEnd = std::max(guestEnd, tiled + mip.tiledSize);
-            linearBegin = std::min(linearBegin, linear);
-            linearEnd = std::max(linearEnd, linear + mip.linearSize);
-        }
-    }
-    Require(guestBegin < guestEnd && guestEnd <= geometry.guestBytes, "viewed mip levels lie outside the surface");
-    viewed.guestOffset = guestBegin;
-    viewed.guestBytes = guestEnd - guestBegin;
-    viewed.linearOffset = linearBegin;
-    viewed.linearBytes = linearEnd - linearBegin;
-    return viewed;
 }
 
 std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::uint32_t arrayLayers) {

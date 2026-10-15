@@ -17,6 +17,7 @@
 #include <span>
 #include <utility>
 #include <vector>
+#include "prx/libc/include/general/AtomicSharedPtr.hpp"
 
 namespace AgcDriver::DriverDetail {
 
@@ -31,7 +32,7 @@ struct DispatchVariant {
 
     std::shared_ptr<const ShaderSnapshot> shader;
 
-    std::atomic<std::shared_ptr<const Recipe>> recipe;
+    AtomicSharedPtr<const Recipe> recipe;
 
     static constexpr std::uint32_t NoFlatBinding = std::numeric_limits<std::uint32_t>::max();
     std::vector<std::uint32_t> dataPositions;
@@ -39,7 +40,6 @@ struct DispatchVariant {
     std::uint32_t flatBinding = NoFlatBinding;
 
     std::uint32_t pushOffset = 0;
-    std::vector<std::uint32_t> userData;
     std::shared_ptr<const ShaderRecompiler::ShaderVertexStageInfo> vertexInfo;
 
     std::shared_ptr<ShaderMemory> memory;

@@ -3,6 +3,7 @@
 
 #include "RuntimeAbi.hpp"
 #include "PipelineSpecialization.hpp"
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <string_view>
 #include <vector>
 
@@ -107,6 +109,18 @@ enum class ConservativeZExport : std::uint8_t {
     GreaterThanZ
 };
 
+enum class ColorExportPacking : std::uint8_t {
+    None,
+    Unorm10_11_11
+};
+
+enum class RasterPrimitive : std::uint8_t {
+    Point,
+    Line,
+    Triangle,
+    Rectangle
+};
+
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
@@ -119,6 +133,7 @@ struct ShaderPixelStageInfo {
     bool posZ;
     bool posW;
     bool frontFace;
+    bool frontFaceAllBits;
     bool ancillary;
     bool sampleShading;
     bool noPerspective;
@@ -132,6 +147,15 @@ struct ShaderPixelStageInfo {
     bool orderedPixelShader;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
+    std::array<ColorExportPacking, 8> targetExportPacking;
+    bool dualSourceBlend;
+    bool alphaToCoverage;
+    bool stencilRefExportEnable;
+    RasterPrimitive rasterPrimitive = RasterPrimitive::Triangle;
+    bool layerExported = false;
+    bool ditheredAlphaToCoverage = false;
+    std::uint8_t quadPixelMask = 0xf;
+    std::array<std::uint16_t, 4> quadSampleMask{0xffffu, 0xffffu, 0xffffu, 0xffffu};
 };
 
 struct ShaderVertexBufferResource {
@@ -153,6 +177,7 @@ struct ShaderVertexStageInfo {
     std::uint32_t fetchAttribReg;
     std::uint32_t fetchBufferReg;
     bool fetchEmbedded;
+    std::uint32_t paClVsOutCntl = 0;
 };
 
 struct ShaderFloatMode {
@@ -167,6 +192,7 @@ struct ShaderFloatMode {
 inline constexpr std::uint32_t InterpolationQuiet = 1u;
 inline constexpr std::uint32_t InterpolationFlush32 = 2u;
 inline constexpr std::uint32_t InterpolationFlush16 = 4u;
+inline constexpr std::uint32_t InterpolationRound16Shift = 3u;
 
 struct GuestContext {
     std::uint32_t waveSize;
@@ -177,6 +203,7 @@ struct GuestContext {
     std::optional<ShaderVertexStageInfo> vertex;
     std::span<const MemoryRegion> memory;
     std::optional<ShaderFloatMode> floatMode;
+    std::span<const std::uint32_t> linkedCallFallbacks;
 };
 
 struct MeshTargetLimits {
@@ -217,6 +244,12 @@ struct SpirvTarget {
     bool nonConstantImageOffsets = false;
     std::uint32_t srgbDecodeFormats = 0;
     bool narrowSubgroupClock = false;
+    bool fixedPushSlots = false;
+    bool float64DenormPreserve = false;
+    bool registrationModules = false;
+    std::uint32_t registrationWordLimit = 200000u;
+    bool vertexSubgroups = true;
+    bool float16DenormPreserve = false;
 };
 
 struct BindingLayout {
@@ -261,15 +294,26 @@ struct TessellationConfiguration {
     std::uint32_t domain;
     std::uint32_t partitioning;
     std::uint32_t outputTopology;
+    std::uint32_t patchesPerGroup = 256;
+    std::uint32_t primitiveGroupSize = 0;
+    bool breakAtInstance = false;
+    std::uint32_t instancePatches = 0;
+    bool drawParameters = false;
 };
 
 inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;
 inline constexpr std::uint32_t MeshDrawPushBytes = 24;
+inline constexpr std::uint32_t TessellationLevelPushOffsetBytes = 120;
+inline constexpr std::uint32_t TessellationLevelPushBytes = 8;
 inline constexpr std::uint32_t MeshArgumentAddressDword = 4;
 inline constexpr std::uint32_t MeshArgumentIndexCountDword = 3;
 inline constexpr std::uint32_t MeshArgumentFirstIndexDword = 4;
 inline constexpr std::uint32_t MeshArgumentBytes = 20;
+inline constexpr std::uint32_t MeshIndexRestartTable = 0x100;
+inline constexpr std::uint32_t MeshRestartLengthDword = MeshArgumentBytes / 4;
+inline constexpr std::uint32_t MeshRestartTableDword = MeshRestartLengthDword + 1;
 inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
+inline constexpr std::uint32_t WorkgroupMemoryDescriptorSet = 1;
 
 struct GraphicsDrawParameters {
     std::uint64_t indexAddress;
@@ -295,6 +339,11 @@ struct RecompileRequest {
     bool useCache = true;
 };
 
+inline std::uint32_t TessellationInstancePatches(const RecompileRequest& request) {
+    if (!request.graphics || !request.graphics->tessellation || request.graphics->draw.instanceCount <= 1u || request.graphics->tessellation->breakAtInstance) return 0u;
+    return request.graphics->draw.indexCount / request.graphics->tessellation->inputControlPoints;
+}
+
 enum class DescriptorKind {
     UniformBuffer,
     StorageBuffer,
@@ -311,7 +360,8 @@ enum class DescriptorImageShape {
     Image2DArray,
     ImageCube,
     Image3D,
-    Image1DArray
+    Image1DArray,
+    Image2DMultisample
 };
 
 enum class DescriptorRole {
@@ -322,7 +372,10 @@ enum class DescriptorRole {
     BdaPagetable,
     FaultBuffer,
     FlattenedSrt,
-    ShaderData
+    ShaderData,
+    ImageTable,
+    SamplerTable,
+    ImageTableMap
 };
 
 struct DescriptorBinding {
@@ -340,6 +393,7 @@ struct DescriptorBinding {
     std::vector<bool> imageDepthCompare;
     std::vector<bool> imageAtomic;
     std::vector<bool> imageAtomic64;
+    std::vector<DescriptorImageShape> imageShapes;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers
     // binding, empty otherwise). An atomic on a host-imported range is a serialized PCIe round trip
     // (~0.4-0.5 us each on NVIDIA), so a driver may keep these elements in device-local memory.
@@ -351,8 +405,18 @@ struct DescriptorBinding {
     // (a producer that does not fill it) must be treated as written.
     std::vector<bool> bufferWritten;
     std::vector<bool> samplerUnnormalized;
+    std::vector<bool> samplerIntegerBorder;
     std::vector<bool> imageUnnormalized;
+    std::vector<bool> imageUnnormalizedBaseLevel;
     std::vector<std::uint32_t> imageSamplers;
+    std::vector<bool> bufferRead;
+};
+
+struct ImageTableEntryPoison {
+    std::array<std::uint32_t, 8> words{};
+    std::uint32_t dwordCount = 0;
+    std::uint32_t resource = 0;
+    std::uint32_t reason = 0;
 };
 
 struct VertexAttribute {
@@ -369,7 +433,23 @@ struct FragmentParameter {
     bool flat;
     bool perVertex;
     bool custom = false;
+    bool flatP10 = false;
 };
+
+struct BarycentricEmulation {
+    bool active = false;
+    bool smooth = false;
+    bool linear = false;
+};
+
+struct BarycentricEmulationLayout {
+    static constexpr std::uint32_t NoLocation = 0xffffffffu;
+    std::uint32_t smoothLocation = NoLocation;
+    std::uint32_t linearLocation = NoLocation;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> perVertexLocations;
+};
+
+[[nodiscard]] BarycentricEmulationLayout LayoutBarycentricEmulation(std::span<const FragmentParameter> parameters, const BarycentricEmulation& emulation);
 
 // Compiled SPIR-V shared between a cached variant and every result materialized from it: results
 // are copied per dispatch and draw, so the words are reference counted and only duplicated when a
@@ -381,39 +461,43 @@ class SharedSpirv {
 public:
     SharedSpirv() = default;
     SharedSpirv(std::vector<std::uint32_t> words) : words(std::make_shared<std::vector<std::uint32_t>>(std::move(words))) {}
+    SharedSpirv(std::shared_ptr<const void> owner, std::span<const std::uint32_t> view) : owner(std::move(owner)), view(view) {}
     SharedSpirv& operator=(std::vector<std::uint32_t> other) {
         words = std::make_shared<std::vector<std::uint32_t>>(std::move(other));
+        owner.reset();
+        view = {};
         return *this;
     }
 
-    [[nodiscard]] const std::vector<std::uint32_t>& Words() const { return words ? *words : Empty(); }
-    operator const std::vector<std::uint32_t>&() const { return Words(); }
+    [[nodiscard]] std::span<const std::uint32_t> Words() const { return words ? std::span<const std::uint32_t>(*words) : view; }
+    [[nodiscard]] std::vector<std::uint32_t> Copy() const { return {Words().begin(), Words().end()}; }
     [[nodiscard]] std::size_t size() const { return Words().size(); }
     [[nodiscard]] bool empty() const { return Words().empty(); }
     [[nodiscard]] const std::uint32_t* data() const { return Words().data(); }
     [[nodiscard]] std::uint32_t* data() { return Mutable().data(); }
     [[nodiscard]] const std::uint32_t& operator[](std::size_t index) const { return Words()[index]; }
     [[nodiscard]] std::uint32_t& operator[](std::size_t index) { return Mutable()[index]; }
-    [[nodiscard]] std::vector<std::uint32_t>::const_iterator begin() const { return Words().begin(); }
-    [[nodiscard]] std::vector<std::uint32_t>::const_iterator end() const { return Words().end(); }
+    [[nodiscard]] std::span<const std::uint32_t>::iterator begin() const { return Words().begin(); }
+    [[nodiscard]] std::span<const std::uint32_t>::iterator end() const { return Words().end(); }
     [[nodiscard]] std::vector<std::uint32_t>::iterator begin() { return Mutable().begin(); }
     [[nodiscard]] std::vector<std::uint32_t>::iterator end() { return Mutable().end(); }
     void resize(std::size_t count) { Mutable().resize(count); }
     std::vector<std::uint32_t>::iterator insert(std::vector<std::uint32_t>::const_iterator where, std::initializer_list<std::uint32_t> values) { return Mutable().insert(where, values); }
-    friend bool operator==(const SharedSpirv& left, const SharedSpirv& right) { return left.words == right.words || left.Words() == right.Words(); }
+    friend bool operator==(const SharedSpirv& left, const SharedSpirv& right) { return std::ranges::equal(left.Words(), right.Words()); }
 
 private:
-    static const std::vector<std::uint32_t>& Empty() {
-        static const std::vector<std::uint32_t> empty;
-        return empty;
-    }
-    // Copy on write: a holder whose words are shared gets its own copy before the first write.
     std::vector<std::uint32_t>& Mutable() {
-        if (words == nullptr || words.use_count() != 1) words = std::make_shared<std::vector<std::uint32_t>>(Words());
+        if (words == nullptr || words.use_count() != 1) {
+            words = std::make_shared<std::vector<std::uint32_t>>(Copy());
+            owner.reset();
+            view = {};
+        }
         return *words;
     }
 
     std::shared_ptr<std::vector<std::uint32_t>> words;
+    std::shared_ptr<const void> owner;
+    std::span<const std::uint32_t> view;
 };
 
 struct VertexInput {
@@ -441,6 +525,7 @@ struct CompiledShaderArtifact {
     std::uint32_t imageMetadataDword = 0;
     std::uint32_t runtimeImageCount = 0;
     std::vector<std::uint32_t> runtimeImageResources;
+    bool registrationModule = false;
     std::uint32_t bdaAbiVersion = 0;
     std::uint32_t runtimeAbiVersion = RuntimeAbi::Version;
     std::vector<VertexInput> vertexInputs;
@@ -453,6 +538,10 @@ struct CompiledShaderArtifact {
     std::uint32_t hostSubgroupSize = 0;
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
+    BarycentricEmulation barycentricEmulation;
+    std::vector<std::uint32_t> stencilReferences;
+    bool stencilReplaySafe = false;
+    std::uint32_t stencilReferenceDword = 0xffffffffu;
     std::uint64_t variantId = 0;
 };
 
@@ -463,10 +552,16 @@ struct ShaderInvocation {
     std::vector<std::byte> pushConstants;
     std::vector<VertexAttribute> vertexAttributes;
     std::uint32_t poisonedSrtReads = 0;
+    std::vector<ImageTableEntryPoison> imageTablePoison;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> imageTableRanges;
+    std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> imageTableReadRanges;
+    std::uint64_t imageTableShader = 0;
+    std::uint32_t imageTableFaults = 0;
 };
 
 struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
     bool cacheHit = false;
+    std::uint32_t workgroupMemoryDwords = 0;
     [[nodiscard]] std::uint64_t PipelineVariantId() const { return specializationId != 0 ? specializationId : variantId; }
 };
 
@@ -489,6 +584,16 @@ struct RectListShaders {
 };
 
 [[nodiscard]] RectListShaders BuildRectListShaders(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target);
+
+struct GeometryStageLimits {
+    std::uint32_t maxGeometryInputComponents;
+    std::uint32_t maxGeometryOutputComponents;
+    std::uint32_t maxGeometryOutputVertices;
+    std::uint32_t maxGeometryTotalOutputComponents;
+    std::uint32_t maxFragmentInputComponents;
+};
+
+[[nodiscard]] RecompileResult BuildBarycentricGeometryShader(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target, const std::optional<GeometryStageLimits>& limits);
 
 }
 

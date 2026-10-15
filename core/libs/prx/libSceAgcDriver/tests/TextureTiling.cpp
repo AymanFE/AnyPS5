@@ -286,6 +286,12 @@ void RunTextureTilingTests() {
         }
         constexpr ElementAddress xorZx64[] = {{0, 0, 0, 0, 0x8400}, {0, 32, 19, 11, 0xbc350}, {0, 16, 6, 6, 0x69040}, {0, 11, 19, 0, 0xe778}, {0, 32, 0, 11, 0xb8100}, {1, 0, 0, 0, 0x400}, {1, 15, 9, 5, 0x52eb8}, {1, 8, 3, 3, 0x32950}, {1, 5, 9, 0, 0x598}, {1, 15, 0, 5, 0x52fa8}, {2, 0, 0, 0, 0x800}, {2, 7, 4, 2, 0x21ca8}, {2, 4, 1, 1, 0x10090}, {2, 2, 4, 0, 0x1820}, {2, 7, 0, 2, 0x20ca8}, {3, 0, 0, 0, 0x4200}, {3, 3, 1, 0, 0x4238}, {3, 2, 0, 0, 0x4220}, {3, 1, 1, 0, 0x4218}, {3, 3, 0, 0, 0x4228}, {4, 0, 0, 0, 0x200}, {4, 1, 0, 0, 0x208}, {4, 1, 0, 0, 0x208}, {4, 0, 0, 0, 0x200}, {4, 1, 0, 0, 0x208}, {5, 0, 0, 0, 0x2000}, {5, 0, 0, 0, 0x2000}, {5, 0, 0, 0, 0x2000}, {5, 0, 0, 0, 0x2000}, {5, 0, 0, 0, 0x2000}};
         requireSliceAddresses(thickVolume(TextureTileMode::kZ64KBX, 71, 33, 20, 12, 6), 8, 786432, xorZx64, "thin SW_64KB_Z_X 64 bpp 33x20x12, 6 levels");
+        constexpr ElementAddress xorDx32[] = {{0, 0, 0, 0, 0x0}, {0, 63, 63, 15, 0x3f0fc}, {0, 47, 4, 9, 0x13134}, {0, 54, 3, 3, 0x19af8}, {0, 23, 39, 12, 0x2ba5c}, {0, 57, 14, 7, 0x1c6e4}};
+        requireThickAddresses(thickVolume(TextureTileMode::kD64KBX, 56, 64, 64, 16, 1), 4, 1, 262144, xorDx32, "SW_64KB_D_X 32 bpp 64x64x16, 1 level");
+        constexpr ElementAddress xorDx8[] = {{0, 0, 0, 0, 0x20000}, {0, 99, 59, 69, 0x112b9f}, {0, 15, 52, 41, 0xa1347}, {0, 86, 43, 67, 0x11637e}, {0, 87, 59, 38, 0xb61fb}, {1, 0, 0, 0, 0x10000}, {1, 49, 29, 34, 0x76d29}, {1, 11, 28, 6, 0x126a3}, {1, 8, 27, 2, 0x12238}, {1, 30, 6, 17, 0x1c756}, {2, 0, 0, 0, 0x800}, {2, 24, 14, 16, 0xee10}, {2, 8, 3, 12, 0x1998}, {2, 15, 5, 9, 0x1d4f}, {2, 8, 8, 11, 0x3824}, {3, 0, 0, 0, 0x200}, {3, 11, 6, 7, 0x7b7}, {3, 7, 3, 6, 0x2fb}, {3, 3, 5, 4, 0x68b}, {3, 7, 2, 0, 0x253}, {4, 0, 0, 0, 0x4200}, {4, 5, 2, 3, 0x4275}, {4, 0, 2, 1, 0x4214}, {4, 2, 1, 1, 0x420e}, {4, 0, 2, 0, 0x4210}, {5, 0, 0, 0, 0x2000}, {5, 2, 0, 1, 0x2006}, {5, 1, 0, 0, 0x2001}, {6, 0, 0, 0, 0x2500}};
+        requireThickAddresses(thickVolume(TextureTileMode::kD64KBX, 1, 100, 60, 70, 7), 1, 2, 1179648, xorDx8, "SW_64KB_D_X 8 bpp 100x60x70, 7 levels");
+        constexpr ElementAddress xorDx128[] = {{0, 0, 0, 0, 0x10000}, {0, 8, 4, 2, 0x1c180}, {0, 0, 2, 1, 0x10820}, {0, 2, 3, 0, 0x10a40}, {0, 8, 4, 1, 0x1c120}, {1, 0, 0, 0, 0x8100}, {1, 3, 1, 0, 0x8350}, {1, 1, 0, 0, 0x8110}, {1, 0, 1, 0, 0x8140}, {1, 2, 0, 0, 0x8300}, {2, 0, 0, 0, 0x100}, {2, 1, 0, 0, 0x110}, {3, 0, 0, 0, 0x1000}};
+        requireThickAddresses(thickVolume(TextureTileMode::kD64KBX, 77, 9, 5, 3, 4), 16, 1, 131072, xorDx128, "SW_64KB_D_X 128 bpp 9x5x3, 4 levels");
     }
 
     {
@@ -303,6 +309,10 @@ void RunTextureTilingTests() {
         requireThinAddresses(TextureTileMode::kS4KBX, 1, 100, 70, 6, 3, 73728, 24576, atS4KBX, "swizzle mode 21, 1 bytes, 100x70, 6 levels, 3 slices");
         constexpr ElementAddress atD4KBX[] = {{0, 0, 0, 0, 0x2000}, {0, 32, 19, 0, 0x3030}, {0, 16, 6, 0, 0x2860}, {0, 32, 0, 0, 0x3400}, {0, 0, 19, 0, 0x2430}, {0, 0, 0, 1, 0x6800}, {0, 32, 19, 1, 0x7830}, {0, 16, 6, 1, 0x6060}, {0, 32, 0, 1, 0x7c00}, {0, 0, 19, 1, 0x6c30}, {1, 0, 0, 0, 0x1000}, {1, 15, 9, 0, 0x139c}, {1, 8, 3, 0, 0x1230}, {1, 15, 0, 0, 0x128c}, {1, 0, 9, 0, 0x1110}, {1, 0, 0, 1, 0x5800}, {1, 15, 9, 1, 0x5b9c}, {1, 8, 3, 1, 0x5a30}, {1, 15, 0, 1, 0x5a8c}, {1, 0, 9, 1, 0x5910}, {2, 0, 0, 0, 0x800}, {2, 7, 4, 0, 0x8cc}, {2, 4, 1, 0, 0x890}, {2, 7, 0, 0, 0x88c}, {2, 0, 4, 0, 0x840}, {2, 0, 0, 1, 0x4000}, {2, 7, 4, 1, 0x40cc}, {2, 4, 1, 1, 0x4090}, {2, 7, 0, 1, 0x408c}, {2, 0, 4, 1, 0x4040}, {3, 0, 0, 0, 0x600}, {3, 3, 1, 0, 0x61c}, {3, 2, 0, 0, 0x608}, {3, 3, 0, 0, 0x60c}, {3, 0, 1, 0, 0x610}, {3, 0, 0, 1, 0x4e00}, {3, 3, 1, 1, 0x4e1c}, {3, 2, 0, 1, 0x4e08}, {3, 3, 0, 1, 0x4e0c}, {3, 0, 1, 1, 0x4e10}};
         requireThinAddresses(TextureTileMode::kD4KBX, 56, 33, 20, 4, 2, 32768, 16384, atD4KBX, "swizzle mode 22, 4 bytes, 33x20, 4 levels, 2 slices");
+        constexpr ElementAddress atZ64KBX8[] = {{0, 0, 0, 0, 0x20000}, {1, 0, 0, 0, 0x10000}};
+        requireThinAddresses(TextureTileMode::kZ64KBX, 1, 256, 256, 9, 1, 196608, 196608, atZ64KBX8, "swizzle mode 24, 1 bytes, 256x256, 9 levels, 1 slices");
+        constexpr ElementAddress atZ64KBX16[] = {{0, 0, 0, 0, 0x10000}};
+        requireThinAddresses(TextureTileMode::kZ64KBX, 7, 128, 128, 8, 1, 131072, 131072, atZ64KBX16, "swizzle mode 24, 2 bytes, 128x128, 8 levels, 1 slices");
     }
 
     {
@@ -356,61 +366,6 @@ void RunTextureTilingTests() {
         Require(linear.pitchBytes > 800 && rows.size() == 3 && rows[1].first == linear.pitchBytes && rows[1].second == linear.pitchBytes + 800, "linear covered bytes are not the rows without their pitch padding");
         const auto dense = ComputeElementMipLayout(TextureTileMode::kLinear, 4, 256, 3, 1).front();
         Require(dense.pitchBytes == 1024 && CoveredMipBytes(TextureTileMode::kLinear, 4, dense) == std::vector<std::pair<std::uint64_t, std::uint64_t>>{{0, 3072}}, "linear rows without padding are not one range");
-    }
-
-    {
-        GuestTextureResource resource{};
-        resource.width = 1024;
-        resource.height = 1024;
-        resource.mipCount = 11;
-        resource.lastLevel = 10;
-        resource.tileMode = TextureTileMode::kStandard64KB;
-        resource.dimension = TextureDimension::k2D;
-        resource.format = 182;
-        const auto geometry = DescribeSurface(resource);
-        const auto whole = DescribeViewedLevels(resource, geometry);
-        Require(whole.whole && whole.first == 0 && whole.count == 11 && whole.guestOffset == 0 && whole.guestBytes == geometry.guestBytes && whole.linearOffset == 0 && whole.linearBytes == geometry.sliceLinearBytes, "a descriptor over the whole chain views the whole surface");
-
-        resource.baseLevel = 3;
-        const auto streamed = DescribeViewedLevels(resource, geometry);
-        Require(!streamed.whole && streamed.first == 3 && streamed.count == 8, "a base level views the levels from it to the last");
-        std::uint64_t expectedBegin = geometry.guestBytes;
-        std::uint64_t expectedEnd = 0;
-        for (std::uint32_t level = 3; level < 11; ++level) {
-            expectedBegin = std::min(expectedBegin, geometry.mips[level].tiledOffset);
-            expectedEnd = std::max(expectedEnd, geometry.mips[level].tiledOffset + geometry.mips[level].tiledSize);
-        }
-        Require(streamed.guestOffset == expectedBegin && streamed.guestOffset + streamed.guestBytes == expectedEnd, "the viewed guest range covers exactly the viewed levels");
-        Require(streamed.guestOffset + streamed.guestBytes == geometry.mips[3].tiledOffset + geometry.mips[3].tiledSize, "the viewed guest range ends with the base level, which 64 KiB tiling stores last");
-        Require(streamed.guestBytes * 16 <= geometry.guestBytes, "viewing from level 3 holds at most a sixteenth of the surface");
-        for (std::uint32_t level = 3; level < 11; ++level) {
-            const auto& mip = geometry.mips[level];
-            Require(mip.tiledOffset >= streamed.guestOffset && mip.tiledOffset + mip.tiledSize <= streamed.guestOffset + streamed.guestBytes, "a viewed level lies inside the viewed guest range");
-            Require(mip.linearOffset >= streamed.linearOffset && mip.linearOffset + mip.linearSize <= streamed.linearOffset + streamed.linearBytes, "a viewed level lies inside the viewed linear range");
-        }
-        Require(geometry.mips[0].tiledOffset >= streamed.guestOffset + streamed.guestBytes, "level 0 lies outside the viewed guest range");
-
-        resource.baseLevel = 0;
-        resource.minLod = 2u * 256u + 128u;
-        const auto clamped = DescribeViewedLevels(resource, geometry);
-        Require(clamped.whole && clamped.first == 0 && clamped.count == 11, "a minimum LOD clamp keeps the whole chain, since size and level queries answer for the base level");
-
-        resource.minLod = 0;
-        resource.baseLevel = 10;
-        resource.lastLevel = 10;
-        const auto single = DescribeViewedLevels(resource, geometry);
-        Require(single.first == 10 && single.count == 1 && single.guestBytes == geometry.mips[10].tiledSize, "a single-level view covers that level alone");
-
-        GuestTextureResource array = resource;
-        array.baseLevel = 0;
-        array.lastLevel = 10;
-        array.dimension = TextureDimension::k2DArray;
-        array.depthOrLastArray = 3;
-        array.baseLevel = 9;
-        const auto arrayGeometry = DescribeSurface(array);
-        const auto layered = DescribeViewedLevels(array, arrayGeometry);
-        Require(!layered.whole && layered.first == 9 && layered.count == 2, "an array view from level 9 holds two levels");
-        Require(layered.guestOffset == std::min(arrayGeometry.mips[9].tiledOffset, arrayGeometry.mips[10].tiledOffset) && layered.guestOffset + layered.guestBytes == arrayGeometry.GuestLayerOffset(3) + std::max(arrayGeometry.mips[9].tiledOffset + arrayGeometry.mips[9].tiledSize, arrayGeometry.mips[10].tiledOffset + arrayGeometry.mips[10].tiledSize), "an array view spans from the first layer's viewed levels to the last layer's");
     }
 
     reject([] { ComputeSurfaceSize({}, 1); }, "empty mip chain");

@@ -14,10 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "macos"))
 from import_fixture import fixture as import_fixture
 from nid import nid
 from tls_fixture import fixture as tls_fixture
+from test_guest_module_directories import module_with_symbol
 
 MH_MAGIC_64 = 0xFEEDFACF
 CPU_TYPE_X86_64 = 0x01000007
 MH_EXECUTE = 2
+MH_PIE = 0x200000
 LC_SEGMENT_64 = 0x19
 LC_LOAD_DYLIB = 0xC
 LC_RPATH = 0x8000001C
@@ -34,8 +36,8 @@ GS_LOAD = bytes.fromhex("65488b04c5" "00000000")
 class MachO:
     def __init__(self, data):
         self.data = data
-        magic, cputype, _, filetype, ncmds, sizeofcmds, _, _ = struct.unpack_from("<IIIIIIII", data, 0)
-        self.magic, self.cputype, self.filetype, self.sizeofcmds = magic, cputype, filetype, sizeofcmds
+        magic, cputype, _, filetype, ncmds, sizeofcmds, flags, _ = struct.unpack_from("<IIIIIIII", data, 0)
+        self.magic, self.cputype, self.filetype, self.sizeofcmds, self.flags = magic, cputype, filetype, sizeofcmds, flags
         self.segments = []
         self.sections = {}
         self.dylibs = []
@@ -91,6 +93,7 @@ def check_structure(name, data):
     check(macho.magic == MH_MAGIC_64, f"{name}: not a 64-bit Mach-O")
     check(macho.cputype == CPU_TYPE_X86_64, f"{name}: not x86-64")
     check(macho.filetype == MH_EXECUTE, f"{name}: not an executable")
+    check(macho.flags & MH_PIE == 0, f"{name}: MH_PIE is set, so dyld slides the fixed-base image")
     check(macho.end == 32 + macho.sizeofcmds, f"{name}: load commands do not add up to sizeofcmds")
     names = [segment["name"] for segment in macho.segments]
     check(names[:2] == ["__PAGEZERO", "__TEXT"] and names[-1] == "__LINKEDIT", f"{name}: unexpected segment order {names}")
@@ -143,12 +146,43 @@ def check_options(relinker, directory):
     check(result.returncode != 0 and "--windows conflicts with --macos" in result.stdout + result.stderr, "--macos together with --windows was accepted")
 
 
+def check_runpath_lists(relinker, directory):
+    source = Path(directory) / "runpaths.elf"
+    source.write_bytes(bytes(import_fixture()))
+    modules = Path(directory) / "sce_module"
+    modules.mkdir()
+    (modules / "module.prx").write_bytes(module_with_symbol(True))
+    for index, (configured, expected) in enumerate((
+            ("$ORIGIN/first:$ORIGIN/second", ["@executable_path/first", "@executable_path/second"]),
+            ("$ORIGIN:$ORIGIN/libs:$ORIGIN", ["@executable_path", "@executable_path/libs", "@executable_path"]),
+            ("/first:/second", ["/first", "/second"]))):
+        output = Path(directory) / f"runpaths-{index}"
+        options = ["--skip-sce-module"] if configured.startswith("/") else []
+        result = subprocess.run([str(relinker), "--macos", *options, "--rpath", configured,
+                                 str(source), str(output)], capture_output=True, text=True, timeout=20)
+        check(result.returncode == 0, f"run paths: {result.stdout}{result.stderr}")
+        actual = MachO(output.read_bytes()).rpaths
+        check(actual == expected, f"run paths: {actual}")
+        if not options:
+            guest = MachO((Path(directory) / "app0/sce_module/module.prx.guest.prx").read_bytes()).rpaths
+            expected_guest = [path.replace("@executable_path", "@loader_path/../..") for path in expected]
+            check(guest == expected_guest, f"guest run paths: {guest}")
+    for configured in (":$ORIGIN/libs", "$ORIGIN/libs:", "$ORIGIN/first::$ORIGIN/second"):
+        output = Path(directory) / "empty-runpaths"
+        result = subprocess.run([str(relinker), "--macos", "--skip-sce-module", "--rpath", configured,
+                                 str(source), str(output)], capture_output=True, text=True, timeout=20)
+        check(result.returncode != 0 and "Empty macOS run path component" in result.stdout + result.stderr,
+              f"empty run path accepted: {configured}")
+        check(not output.exists(), "empty run path created an output")
+
+
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-macos-output-") as directory:
         check_imports(relink(relinker, directory, "import", import_fixture()))
         check_tls(relink(relinker, directory, "tls", tls_fixture()))
         check_options(relinker, directory)
+        check_runpath_lists(relinker, directory)
     print("macOS output checks passed")
 
 

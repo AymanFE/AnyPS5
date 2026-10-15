@@ -2,11 +2,22 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 
 extern "C" {
 int APS5_VABI sceSslInit_nid_postfix(std::size_t);
+int APS5_VABI sceSslTerm_nid_postfix(int);
 int APS5_VABI sceSslGetCaCerts(int, void*);
 int APS5_VABI sceSslFreeCaCerts(int, void*);
+int APS5_VABI sceSslGetCaList(int, void*);
+int APS5_VABI sceSslFreeCaList(int, void*);
+int APS5_VABI sceSslUnloadCert(int);
+int APS5_VABI sceSslCreateConnection(int, int, const char*);
+int APS5_VABI sceSslDeleteConnection(int);
+int APS5_VABI sceSslSetVerifyCallback(int, int (APS5_VABI *)(int, unsigned int, void**, int, void*), void*);
+int APS5_VABI sceSslConnect(int);
+int APS5_VABI sceSslRead(int, void*, std::size_t, int);
+int APS5_VABI sceSslWrite(int, void*, std::size_t, int);
 }
 
 struct SslMemoryPoolStats {
@@ -20,17 +31,33 @@ extern "C" int APS5_VABI sceSslGetMemoryPoolStats(int, SslMemoryPoolStats*);
 
 static void Require(bool value) { if (!value) std::abort(); }
 
+template <typename TCall>
+static bool Throws(TCall call) {
+    try {
+        call();
+    } catch (const std::exception&) {
+        return true;
+    }
+    return false;
+}
+
+static int APS5_VABI VerifyCallback(int, unsigned int, void**, int, void*) { return 0; }
+
 struct SslCaCerts {
     void* certs;
     std::size_t num;
     void* pool;
 };
 
+struct SslCaList {
+    void** certs;
+    int num;
+};
+
 int main() {
     constexpr int notFound = static_cast<int>(0x8095F004);
     constexpr int invalidArg = static_cast<int>(0x8095177A);
     int marker = 0;
-
     const int context = sceSslInit_nid_postfix(0x10000);
     Require(context > 0);
     SslMemoryPoolStats stats{1, 1, 1, 1};
@@ -46,4 +73,55 @@ int main() {
     certs = {&marker, 3, &marker};
     Require(sceSslFreeCaCerts(context, &certs) == 0);
     Require(certs.certs == nullptr && certs.num == 0 && certs.pool == nullptr);
+
+    Require(sceSslGetCaList(context, nullptr) == invalidArg);
+    Require(sceSslFreeCaList(context, nullptr) == invalidArg);
+
+    void* handle = &marker;
+    SslCaList list{&handle, 3};
+    Require(sceSslGetCaList(context, &list) == notFound);
+    Require(list.certs == nullptr && list.num == 0);
+    Require(sceSslFreeCaList(context, &list) == 0);
+    Require(list.certs == nullptr && list.num == 0);
+
+    SslCaList foreign{&handle, 1};
+    Require(Throws([&] { sceSslFreeCaList(context, &foreign); }));
+    foreign = {nullptr, 1};
+    Require(Throws([&] { sceSslFreeCaList(context, &foreign); }));
+    foreign = {&handle, 0};
+    Require(Throws([&] { sceSslFreeCaList(context, &foreign); }));
+
+    Require(sceSslUnloadCert(context) == 0);
+    Require(sceSslGetCaList(context, &list) == notFound);
+    Require(list.certs == nullptr && list.num == 0);
+
+    constexpr int invalidId = static_cast<int>(0x8095F006);
+    Require(Throws([&] { sceSslCreateConnection(context, 0, nullptr); }));
+    Require(sceSslCreateConnection(context + 1000, 0, "example.com") == invalidId);
+
+    const int connection = sceSslCreateConnection(context, 0, "example.com");
+    Require(connection > 0 && connection != context);
+    Require(sceSslSetVerifyCallback(connection, VerifyCallback, &marker) == 0);
+    Require(sceSslSetVerifyCallback(connection, nullptr, nullptr) == 0);
+    char buffer[4]{};
+    Require(Throws([&] { sceSslConnect(connection); }));
+    Require(Throws([&] { sceSslRead(connection, buffer, sizeof(buffer), 0); }));
+    Require(Throws([&] { sceSslWrite(connection, buffer, sizeof(buffer), 0); }));
+
+    const int unknown = connection + 1000;
+    Require(Throws([&] { sceSslSetVerifyCallback(unknown, nullptr, nullptr); }));
+    Require(Throws([&] { sceSslDeleteConnection(unknown); }));
+
+    Require(sceSslTerm_nid_postfix(context) == 0);
+    Require(Throws([&] { sceSslSetVerifyCallback(connection, nullptr, nullptr); }));
+    Require(sceSslCreateConnection(context, 0, "example.com") == invalidId);
+    Require(sceSslDeleteConnection(connection) == 0);
+    Require(Throws([&] { sceSslDeleteConnection(connection); }));
+
+    Require(sceSslGetCaList(context, nullptr) == invalidArg);
+    Require(sceSslFreeCaList(context, nullptr) == invalidArg);
+    list = {&handle, 3};
+    Require(Throws([&] { sceSslGetCaList(context, &list); }));
+    Require(Throws([&] { sceSslFreeCaList(context, &list); }));
+    Require(Throws([&] { sceSslUnloadCert(context); }));
 }

@@ -52,6 +52,7 @@ public:
         append(key, request.context.pixel);
         append(key, request.context.vertex);
         append(key, request.context.floatMode);
+        appendFallbacks(key, request);
         appendMesh(key, request);
         appendTessellation(key, request);
         std::uint64_t hash = 0xcbf29ce484222325ull;
@@ -84,12 +85,18 @@ private:
         append(key, request.context.pixel);
         append(key, request.context.vertex);
         append(key, request.context.floatMode);
+        appendFallbacks(key, request);
         appendMesh(key, request);
         appendTessellation(key, request);
         append(key, request.target);
         append(key, DebugProbeActive());
         append(key, RayTracingStrict());
         append(key, RayTracingMiss());
+    }
+
+    static void appendFallbacks(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
+        append(key, request.context.linkedCallFallbacks.size());
+        for (const auto programCounter : request.context.linkedCallFallbacks) append(key, programCounter);
     }
 
     static void appendMesh(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
@@ -106,6 +113,10 @@ private:
         append(key, tessellation != nullptr);
         if (tessellation == nullptr) return;
         for (const auto value : {tessellation->inputControlPoints, tessellation->outputControlPoints, tessellation->domain, tessellation->partitioning, tessellation->outputTopology}) append(key, value);
+        if (request.shader.stage == ShaderStage::Local) return;
+        append(key, tessellation->patchesPerGroup);
+        append(key, tessellation->primitiveGroupSize);
+        append(key, TessellationInstancePatches(request));
     }
 
     template<typename TValue>
@@ -165,6 +176,7 @@ private:
         append(key, value.posZ);
         append(key, value.posW);
         append(key, value.frontFace);
+        append(key, value.frontFaceAllBits);
         append(key, value.ancillary);
         append(key, value.sampleShading);
         append(key, value.noPerspective);
@@ -176,6 +188,11 @@ private:
         append(key, value.executeOnNoop);
         append(key, value.conservativeZExport);
         append(key, value.orderedPixelShader);
+        append(key, value.alphaToCoverage);
+        append(key, value.stencilRefExportEnable);
+        append(key, value.ditheredAlphaToCoverage);
+        append(key, value.quadPixelMask);
+        append(key, value.quadSampleMask);
         append(key, value.targetOutputMode);
     }
 
@@ -190,6 +207,7 @@ private:
         append(key, value.fetchAttribReg);
         append(key, value.fetchBufferReg);
         append(key, value.fetchEmbedded);
+        append(key, value.paClVsOutCntl);
         if (value.resourcesNum > value.resources.size()) throw std::runtime_error("Shader cache: invalid vertex resource count");
         append(key, value.resourcesNum);
         for (std::uint32_t i = 0; i < value.resourcesNum; ++i) {
@@ -238,6 +256,11 @@ private:
         append(key, value.nonConstantImageOffsets);
         append(key, value.srgbDecodeFormats);
         append(key, value.narrowSubgroupClock);
+        append(key, value.float64DenormPreserve);
+        append(key, value.registrationModules);
+        append(key, value.registrationWordLimit);
+        append(key, value.vertexSubgroups);
+        append(key, value.float16DenormPreserve);
     }
 };
 

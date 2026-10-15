@@ -30,6 +30,7 @@ void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t a
 // Variants for resources in heaps the guest commits on demand (partially resident textures, GPU
 // scratch heaps): uncommitted pages read as zeros, are not compared, and are never stored.
 void ReadCommitted(std::uint64_t address, std::span<std::byte> destination);
+void ReadCommittedUnsynced(std::uint64_t address, std::span<std::byte> destination);
 bool EqualsCommitted(std::uint64_t address, std::span<const std::byte> bytes);
 // EqualsCommitted without the flush hook: the caller has decided that the recorded GPU work
 // writing the range need not be waited for (the dispatch-cache validation in Driver.cpp).
@@ -59,7 +60,8 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
 // UnchangedSince is always false, so callers fall back to comparing bytes.
 bool WriteWatched();
 void Unwatch(std::uint64_t address, std::size_t bytes);
-bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import);
+bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import, bool staysWatched = true);
+void SetUnwatchHook(void (*hook)(std::uint64_t address, std::size_t bytes));
 bool Watched(std::uint64_t address, std::size_t bytes);
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes);
 bool UnchangedSince(std::uint64_t address, std::size_t bytes, std::uint64_t generation);
@@ -71,6 +73,8 @@ struct UnchangedQuery {
 };
 bool WrittenSince(std::uint64_t address, std::size_t bytes, std::uint64_t generation);
 bool UnchangedSinceAll(std::span<const UnchangedQuery> queries);
+std::uint64_t CollectCommittedWrites(std::uint64_t address, std::size_t bytes, std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges);
+bool UnchangedCommittedSince(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, std::uint64_t generation);
 // Returns the generation the blocks were stamped with (0 when the arena is not write-watched):
 // UnchangedSince(range, it) holds until the next store over the range.
 std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes);
@@ -95,12 +99,16 @@ bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generati
 void BumpCollectEpoch();
 std::uint64_t CollectEpoch();
 std::uint64_t CollectEpochBumps();
+std::uint64_t ThreadCollectEpoch();
+std::uint64_t UnwatchSerial();
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes);
 // The tracker's current generation (every collect and MarkWritten bumps it): a stamp taken after
 // a set of driver stores, for UnchangedSinceCollected to compare against later. Read under the
 // tracker mutex, so every collect that bumped before it has finished its walk and every later
 // collect stamps newer.
 std::uint64_t TrackerGeneration();
+std::uint64_t NewestStamp(std::uint64_t address, std::size_t bytes);
+std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes);
 // Whether no CPU write touched the range since `generation`: an uncached resetting collect of the
 // range's pages first (a game store not collected yet becomes a block stamp), then the compare over
 // the stamps collects make (dirty pages), not the MarkWritten stamps of the driver's own GPU label
@@ -114,7 +122,6 @@ bool UnchangedSinceCollected(std::uint64_t address, std::size_t bytes, std::uint
 // watched arena, or for a generation of 0, a block reads as changed.
 constexpr std::uint8_t BlockUnchanged = 0;
 constexpr std::uint8_t BlockWritten = 1;
-constexpr std::uint8_t BlockMaybeWritten = 2;
 bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> generations, std::span<std::uint8_t> changed, std::span<std::uint8_t> cpu = {});
 
 // Serializes device work: draws, dispatches, presentation and the deferred write-backs below. The
@@ -149,6 +156,7 @@ GpuMutexType& GpuMutex();
 // work the hold deferred to run without it (the recorder's release of the objects completed batches
 // kept). One hook, set once; it must not take GpuMutex itself.
 void SetGpuUnlockHook(void (*hook)());
+std::uint64_t GpuHoldSerial();
 // Debug aid (APS5_ASSERT_GPU_LOCK=1): aborts with a [lock] line naming `where` when the calling
 // thread does not hold GpuMutex. Recording, submits, command batches and the detiler's pools must
 // only be reached under it (a resource build's stage A runs without it, see ShaderResources).
@@ -183,6 +191,7 @@ unsigned long long CodeOffset(const void* address);
 // every read and store through this interface calls first. Code that reads guest memory directly
 // calls FlushGpuWrites itself.
 void SetFlushHook(void (*hook)(std::uint64_t address, std::size_t bytes));
+void SetReadGuard(void (*guard)(std::uint64_t address, std::size_t bytes));
 void FlushGpuWrites(std::uint64_t address, std::size_t bytes);
 // Moves with every ForgetPages call (the libc invalidator: memory unmapped or re-registered): odd
 // while the call stores its page states, moved past it after, so a reader that loads an even
@@ -236,5 +245,6 @@ std::size_t CaptureCallerOffsets(std::span<unsigned long long> frames, unsigned 
 }
 
 extern "C" void AgcDriverCheckGuestMemory_nid_postfix(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);
+extern "C" void AgcDriverStoreGuestLabel_nid_postfix(std::uint64_t* pointer, std::uint64_t value);
 
 #endif

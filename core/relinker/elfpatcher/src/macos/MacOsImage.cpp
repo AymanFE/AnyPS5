@@ -32,7 +32,6 @@ constexpr std::uint32_t MhDylib = 6;
 constexpr std::uint32_t MhNoUndefs = 0x1;
 constexpr std::uint32_t MhDyldLink = 0x4;
 constexpr std::uint32_t MhTwoLevel = 0x80;
-constexpr std::uint32_t MhPie = 0x200000;
 
 constexpr std::uint32_t LcSegment64 = 0x19;
 constexpr std::uint32_t LcSymtab = 0x2;
@@ -60,6 +59,7 @@ constexpr std::uint8_t RebaseOpcodeDoRebaseImmTimes = 0x50;
 
 constexpr std::uint8_t BindTypePointer = 1;
 constexpr std::uint8_t BindSpecialDylibFlatLookup = 0x0e;
+constexpr std::uint8_t BindSymbolFlagsWeakImport = 0x1;
 constexpr std::uint8_t BindOpcodeDone = 0x00;
 constexpr std::uint8_t BindOpcodeSetDylibSpecialImm = 0x30;
 constexpr std::uint8_t BindOpcodeSetSymbolTrailingFlagsImm = 0x40;
@@ -425,6 +425,15 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
         metaEnd += 8;
         input.Binds.push_back({symbol, metaRva + static_cast<std::uint32_t>(slot)});
     }
+    std::uint64_t moduleArgsSlot = 0;
+    std::uint64_t moduleResultSlot = 0;
+    if (input.InitRva != 0) {
+        moduleArgsSlot = metaEnd;
+        moduleResultSlot = metaEnd + 8;
+        metaEnd += 16;
+        input.Binds.push_back({"___aps5_get_pending_module_args_nid_no_patch", metaRva + static_cast<std::uint32_t>(moduleArgsSlot)});
+        input.Binds.push_back({"___aps5_set_module_init_result_nid_no_patch", metaRva + static_cast<std::uint32_t>(moduleResultSlot)});
+    }
     meta.resize(metaEnd, 0);
     for (std::size_t index = 0; index < input.TlsExports.size(); ++index) {
         const auto& variable = input.TlsExports[index];
@@ -546,8 +555,11 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
             code.Rip({0x48, 0x89, 0x05}, import.Rva);
         }
         if (input.InitRva != 0) {
-            callZeroArgs();
+            code.Rip({0xff, 0x15}, metaRva + static_cast<std::uint32_t>(moduleArgsSlot));
+            code.Emit({0x48, 0x8b, 0x38, 0x48, 0x8b, 0x70, 0x08, 0x31, 0xd2});
             code.Rip({0xe8}, input.InitRva);
+            code.Emit({0x89, 0xc7});
+            code.Rip({0xff, 0x15}, metaRva + static_cast<std::uint32_t>(moduleResultSlot));
         }
         for (const auto slot : input.InitArrayRvas) callSlot(slot);
         if (hasFini) {
@@ -598,7 +610,7 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
     bind.push_back(BindOpcodeSetTypeImm | BindTypePointer);
     for (const auto& item : input.Binds) {
         const auto [segment, offset] = Locate(segments, item.Rva, 8);
-        bind.push_back(BindOpcodeSetSymbolTrailingFlagsImm);
+        bind.push_back(item.Weak ? BindOpcodeSetSymbolTrailingFlagsImm | BindSymbolFlagsWeakImport : BindOpcodeSetSymbolTrailingFlagsImm);
         AppendCString(bind, item.Symbol);
         bind.push_back(BindOpcodeSetAddendSleb);
         AppendSleb(bind, item.Addend);
@@ -792,7 +804,7 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
     Io::WriteU32(file, 12, input.Executable ? MhExecute : MhDylib);
     Io::WriteU32(file, 16, commandCount);
     Io::WriteU32(file, 20, static_cast<std::uint32_t>(commands.size()));
-    Io::WriteU32(file, 24, MhNoUndefs | MhDyldLink | MhTwoLevel | (input.Executable ? MhPie : 0));
+    Io::WriteU32(file, 24, MhNoUndefs | MhDyldLink | MhTwoLevel);
     std::copy(commands.begin(), commands.end(), file.begin() + HeaderSize);
     return file;
 }

@@ -9,8 +9,9 @@
 
 namespace ShaderRecompiler::RuntimeAbi {
 
-inline constexpr std::uint32_t Version = 10u;
+inline constexpr std::uint32_t Version = 12u;
 inline constexpr std::uint32_t DescriptorSet = 0u;
+inline constexpr std::uint32_t FragmentDescriptorSet = 1u;
 inline constexpr std::uint32_t StageCount = 4u;
 inline constexpr std::uint32_t PushConstantDwords = 32u;
 inline constexpr std::uint32_t FirstImageBinding = 1u;
@@ -26,7 +27,10 @@ enum class Binding : std::uint32_t {
     FaultBuffer = 60u,
     FlattenedSrt = 61u,
     ShaderData = 62u,
-    Count = 63u
+    SamplerTable = 63u,
+    ImageTableMap = 64u,
+    Count = 65u,
+    ImageTable = 256u
 };
 
 enum class Stage : std::uint32_t { Main, Fragment, TessellationControl, TessellationEvaluation };
@@ -34,9 +38,18 @@ enum class Stage : std::uint32_t { Main, Fragment, TessellationControl, Tessella
 inline constexpr std::uint32_t UserDataCapacity = 128u;
 inline constexpr std::uint32_t BufferCapacity = 128u;
 inline constexpr std::uint32_t ImageCapacity = 256u;
-inline constexpr std::uint32_t SampledHeapCapacity = 16u;
-inline constexpr std::uint32_t StorageHeapCapacity = 4u;
-inline constexpr std::uint32_t SamplerHeapCapacity = 16u;
+inline constexpr std::uint32_t SampledHeapCapacity = 64u;
+inline constexpr std::uint32_t BindlessTableSlots = 16u;
+inline constexpr std::uint32_t StorageMipSlots = 4u;
+inline constexpr std::uint32_t StorageHeapCapacity = 16u;
+inline constexpr std::uint32_t SamplerHeapCapacity = 32u;
+inline constexpr std::uint32_t StateExportMappings = 0u;
+inline constexpr std::uint32_t StateDwords = 2u;
+inline constexpr std::uint32_t StateVertexSelectors = 0u;
+inline constexpr std::uint32_t VertexSelectorsPerDword = 2u;
+inline constexpr std::uint32_t ImageModeMask = 0xffu;
+inline constexpr std::uint32_t CompareStateShift = 9u;
+inline constexpr std::uint32_t CompareStateMask = 0x1fffu;
 
 struct ResourceMetadata {
     std::uint32_t binding;
@@ -74,16 +87,19 @@ inline std::uint32_t HeapCapacity(Binding binding) {
 }
 
 static_assert(std::is_standard_layout_v<ResourceMetadata> && std::is_trivially_copyable_v<ResourceMetadata> && sizeof(ResourceMetadata) == 48u);
-static_assert(std::is_standard_layout_v<ShaderData> && std::is_trivially_copyable_v<ShaderData> && sizeof(ShaderData) == 13760u);
+static_assert(std::is_standard_layout_v<ShaderData> && std::is_trivially_copyable_v<ShaderData> && sizeof(ShaderData) == 14528u);
 static_assert(UserDataDword == 4u && BufferOffsetsDword == 132u && DispatchThreadLimitDword == 164u);
-static_assert(ExportMappingsDword == 3432u);
+static_assert(ExportMappingsDword == 3624u);
 static_assert(offsetof(ResourceMetadata, descriptor) == 16u && offsetof(ShaderData, images) == 672u && offsetof(ShaderData, samplers) == 12960u);
 
 inline void RequireVersion(std::uint32_t version) {
     if (version != Version) throw std::runtime_error("Shader runtime ABI: incompatible version");
 }
 
+inline constexpr std::uint32_t ImageTableBinding = StageCount * static_cast<std::uint32_t>(Binding::Count);
+
 inline std::uint32_t BindingNumber(Stage stage, Binding binding) {
+    if (binding == Binding::ImageTable) return ImageTableBinding;
     const auto group = static_cast<std::uint32_t>(stage);
     const auto index = static_cast<std::uint32_t>(binding);
     const auto count = static_cast<std::uint32_t>(Binding::Count);
@@ -92,6 +108,7 @@ inline std::uint32_t BindingNumber(Stage stage, Binding binding) {
 }
 
 static_assert(FirstImageBinding + ImageBindingCount == static_cast<std::uint32_t>(Binding::Samplers));
+static_assert(static_cast<std::uint32_t>(Binding::ImageTable) > static_cast<std::uint32_t>(Binding::Count) && ImageTableBinding == 260u);
 
 }
 
