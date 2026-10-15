@@ -61,10 +61,15 @@ public:
     // destination access mask.
     void MarkCovered(VkAccessFlags access);
     void MarkShaderReadsCovered() { MarkCovered(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT); }
+    // Why a draw began a pass instead of continuing the open one (the [draws] pass accounting):
+    // none was open, the caller forced it, the sample-counting segment was not ready, the pass
+    // hazards refused it, or the attachments (the key) changed.
+    enum class PassStartReason : std::uint8_t { Continued, NothingOpen, Forced, SampleSlot, Hazard, TargetsChanged };
     struct DrawPassStart {
         VkCommandBuffer commands = VK_NULL_HANDLE;
         bool continued = false;
         bool barrier = true;
+        PassStartReason reason = PassStartReason::Continued;
     };
     DrawPassStart StartDrawPass(std::uint64_t key, bool forced, bool fenced, const PassAccess& access);
     void LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass = {});
