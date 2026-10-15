@@ -348,6 +348,14 @@ constexpr std::array<const char*, SyncCount> SyncReasonNames{"none", "non-reside
 constexpr std::size_t IndirectPathCount = static_cast<std::size_t>(IndirectDrawPath::Count);
 constexpr std::array<const char*, IndirectPathCount> IndirectDrawPathNames{"gpu-side", "patched SGPR not folded", "fetch offset unknown", "non-vertex path", "GE_INDX_OFFSET", "draw index", "vertex range too large", "feature gap", "pending image results", "pending label or copied write", "not imported", "disabled", "index range not fully readable"};
 
+// Why a recorded draw began a render pass instead of continuing the previous draw's: the
+// attachments or extent differ (the game's own target switch), nothing was open (the first draw of
+// a batch, or other work recorded since the last draw: a dispatch, a label store, a copy), the pass
+// hazards refused it (it reads what the open pass wrote), the sample-counting segment was not
+// ready, the draw reads its own target, it is GPU-indirect, or capture.
+enum PassBegin : std::size_t { PassBeginTargets, PassBeginNothingOpen, PassBeginHazard, PassBeginSampleSlot, PassBeginReadsTarget, PassBeginIndirect, PassBeginCapture, PassBeginCount };
+constexpr std::array<const char*, PassBeginCount> PassBeginNames{"targets changed", "nothing open", "hazard", "sample slot", "reads target", "indirect", "capture"};
+
 // What became of one draw, for the totals.
 struct DrawOutcome {
     // In the recorder; `waited` when the recorder was synced right after (copied writes or a lease).
@@ -360,6 +368,7 @@ struct DrawOutcome {
     bool keyStoresFlushed = false;
     bool storesFlushed = false;
     bool addressDraw = false;
+    PassBegin passBegin = PassBeginTargets;
     SyncReason reason = SyncNone;
     // Shader validation memo (see CachedFragmentOutputs).
     bool validateMemoized = false;
@@ -433,6 +442,7 @@ struct DrawProfile {
     std::uint64_t passesBegun = 0;
     std::uint64_t passesContinued = 0;
     std::array<DrawPassCounts, 2> passTotals{};
+    std::array<std::uint64_t, PassBeginCount> passBegins{};
     std::array<std::uint64_t, SyncCount> reasons{};
     // The CPU inside Graphics::Draw, split by outcome: a synchronous draw costs ten times a recorded
     // one, so one average would only show the synchronous population.
@@ -501,7 +511,10 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     ++profile.draws;
     if (outcome.recorded) ++(outcome.waited ? profile.waited : profile.recorded);
     if (outcome.completion) ++profile.completion;
-    if (outcome.passBegun) ++profile.passesBegun;
+    if (outcome.passBegun) {
+        ++profile.passesBegun;
+        ++profile.passBegins[outcome.passBegin];
+    }
     if (outcome.passContinued) ++profile.passesContinued;
     if (outcome.recorded) {
         auto& totals = profile.passTotals[outcome.addressDraw ? 1 : 0];
@@ -531,8 +544,16 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     const auto synchronous = profile.draws - profile.recorded - profile.waited;
     const auto average = [](double total, std::uint64_t count) { return count != 0 ? total / static_cast<double>(count) : 0.0; };
     char line[2048];
-    int n = std::snprintf(line, sizeof(line), "[draws] %llu draws over 10 s (%llu recorded avg %.0f us, of them %llu with completion; %llu recorded then waited avg %.0f us; %llu synchronous avg %.0f us; render passes %llu begun, %llu draws continued one; waited or synchronous because:", static_cast<unsigned long long>(profile.draws), static_cast<unsigned long long>(profile.recorded), average(profile.recordedUs, profile.recorded), static_cast<unsigned long long>(profile.completion), static_cast<unsigned long long>(profile.waited), average(profile.waitedUs, profile.waited), static_cast<unsigned long long>(synchronous), average(profile.synchronousUs, synchronous), static_cast<unsigned long long>(profile.passesBegun), static_cast<unsigned long long>(profile.passesContinued));
+    int n = std::snprintf(line, sizeof(line), "[draws] %llu draws over 10 s (%llu recorded avg %.0f us, of them %llu with completion; %llu recorded then waited avg %.0f us; %llu synchronous avg %.0f us; render passes %llu begun, %llu draws continued one", static_cast<unsigned long long>(profile.draws), static_cast<unsigned long long>(profile.recorded), average(profile.recordedUs, profile.recorded), static_cast<unsigned long long>(profile.completion), static_cast<unsigned long long>(profile.waited), average(profile.waitedUs, profile.waited), static_cast<unsigned long long>(synchronous), average(profile.synchronousUs, synchronous), static_cast<unsigned long long>(profile.passesBegun), static_cast<unsigned long long>(profile.passesContinued));
     const auto room = [&] { return n > 0 && static_cast<std::size_t>(n) < sizeof(line); };
+    if (profile.passesBegun != 0 && room()) {
+        n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (begun because:");
+        for (std::size_t i = 0; i < PassBeginCount && room(); ++i) {
+            if (profile.passBegins[i] != 0) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s %llu", PassBeginNames[i], static_cast<unsigned long long>(profile.passBegins[i]));
+        }
+        if (room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), ")");
+    }
+    if (room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), "; waited or synchronous because:");
     for (std::size_t i = SyncNone + 1; i < SyncCount && room(); ++i) {
         if (profile.reasons[i] != 0) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s %llu", SyncReasonNames[i], static_cast<unsigned long long>(profile.reasons[i]));
     }
@@ -581,6 +602,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.addressBuilds = 0;
     profile.draws = profile.recorded = profile.waited = profile.completion = 0;
     profile.passesBegun = profile.passesContinued = 0;
+    profile.passBegins.fill(0);
     profile.reasons.fill(0);
     profile.recordedUs = profile.waitedUs = profile.synchronousUs = 0;
     profile.targetLookups = profile.slowLookups = 0;
@@ -1943,6 +1965,10 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     const bool continued = start.continued;
     outcome.passContinued = continued;
     outcome.passBegun = !continued;
+    if (!continued) {
+        using Reason = Recorder::PassStartReason;
+        outcome.passBegin = start.reason == Reason::Forced ? (capture ? PassBeginCapture : readsTarget ? PassBeginReadsTarget : PassBeginIndirect) : start.reason == Reason::NothingOpen ? PassBeginNothingOpen : start.reason == Reason::Hazard ? PassBeginHazard : start.reason == Reason::SampleSlot ? PassBeginSampleSlot : PassBeginTargets;
+    }
     const auto commands = start.commands;
     if (!continued) recorder->PrepareSampleSlot();
     if (capture) captureInputs(context, *recorder, commands, resources, drawBindings, record.targets.empty() || record.targets.front() == nullptr ? 0 : record.targets.front()->Descriptor().baseAddress);
