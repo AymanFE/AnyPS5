@@ -1,6 +1,5 @@
 #include <relinker/pipeline/RelinkerPipeline.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
-#include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/UnusedNidFilter/PltCompactor.hpp>
 #include <relinker/analysis/UnusedNidFilter/EhFrameReader.hpp>
 #include <relinker/analysis/SceCodeExtent.hpp>
@@ -19,7 +18,9 @@ using namespace Elfpatcher;
 
 namespace {
 
+constexpr std::uint16_t kEtNone = 0;
 constexpr std::uint16_t kEtRel = 1;
+constexpr std::uint16_t kEtCore = 4;
 
 }
 
@@ -55,8 +56,13 @@ std::string RelinkerPipeline::relocationTypeName(std::uint32_t type) {
 }
 
 RelinkResult RelinkerPipeline::Relink() {
-    if (elfReader->ReadHeader().Type == kEtRel)
+    const auto inputType = elfReader->ReadHeader().Type;
+    if (inputType == kEtRel)
         throw RelinkerException("ET_REL relocatable inputs are not supported");
+    if (inputType == kEtNone)
+        throw RelinkerException("ET_NONE inputs do not specify an ELF object type");
+    if (inputType == kEtCore)
+        throw RelinkerException("ET_CORE core dumps are not executable images");
 
     auto programHeaders = elfReader->ReadProgramHeaders();
 
@@ -207,12 +213,25 @@ RelinkResult RelinkerPipeline::Relink() {
     }
     const ByteCount dynJmpRelSize = gotSize;
 
-    const FileByteOffset dynRelaOffset = readAsOffset(DT_OS_RELA, DT_RELA, "DT_RELA");
-    const ByteCount dynRelaSize = readAsSize(DT_OS_RELASZ, DT_RELASZ, "DT_RELASZ");
+    if (hasTag(DT_REL) || hasTag(DT_RELSZ) || hasTag(DT_RELENT))
+        throw RelinkerException("DT_REL relocations are not supported");
+    if (hasTag(DT_RELR) || hasTag(DT_RELRSZ) || hasTag(DT_RELRENT))
+        throw RelinkerException("DT_RELR relocations are not supported");
+
+    const bool hasRelaTable = hasTag(DT_OS_RELA) || hasTag(DT_RELA)
+        || hasTag(DT_OS_RELASZ) || hasTag(DT_RELASZ);
+    FileByteOffset dynRelaOffset = 0;
+    ByteCount dynRelaSize = 0;
+    if (hasRelaTable) {
+        dynRelaOffset = readAsOffset(DT_OS_RELA, DT_RELA, "DT_RELA");
+        dynRelaSize = readAsSize(DT_OS_RELASZ, DT_RELASZ, "DT_RELASZ");
+    }
     constexpr std::size_t relaEntSize = 24;
-    const auto relocationEntrySize = readAsSize(DT_OS_RELAENT, DT_RELAENT, "DT_RELAENT");
-    if (relocationEntrySize != relaEntSize)
-        throw RelinkerException("Unsupported DT_RELAENT value: " + std::to_string(relocationEntrySize) + "; expected 24 bytes");
+    if (hasRelaTable || hasTag(DT_OS_RELAENT) || hasTag(DT_RELAENT)) {
+        const auto relocationEntrySize = readAsSize(DT_OS_RELAENT, DT_RELAENT, "DT_RELAENT");
+        if (relocationEntrySize != relaEntSize)
+            throw RelinkerException("Unsupported DT_RELAENT value: " + std::to_string(relocationEntrySize) + "; expected 24 bytes");
+    }
     if (dynRelaSize % relaEntSize != 0)
         throw RelinkerException("Invalid DT_RELASZ value: " + std::to_string(dynRelaSize) + " bytes; expected a multiple of 24 bytes");
 
@@ -223,7 +242,6 @@ RelinkResult RelinkerPipeline::Relink() {
 
     std::vector<NidReference> nidRefs;
     std::vector<std::string> neededLibraries;
-    auto policy = std::dynamic_pointer_cast<ValidationPolicy>(validationPolicy);
 
     const std::vector<std::uint8_t>& raw = elfReader->GetRawBytes();
     const std::optional<ByteCount> dynSymTabSize = hasTag(DT_OS_SYMTABSZ)
@@ -254,7 +272,6 @@ RelinkResult RelinkerPipeline::Relink() {
     for (auto& [fst, snd] : neededLibraryNamesByStrOffset) {
         snd = readCStr(fst);
         neededLibraries.push_back(snd);
-        if (policy) policy->RegisterLibraryImport(snd);
     }
 
     std::map<std::uint64_t, std::string> importModules;
@@ -375,7 +392,6 @@ RelinkResult RelinkerPipeline::Relink() {
         }
     }
 
-    validationPolicy->ValidateSyscallAbsence();
 
     std::vector<std::pair<ByteCount, std::string>> exportedSymbols;
     std::vector<VirtualAddress> exportedFunctions;
