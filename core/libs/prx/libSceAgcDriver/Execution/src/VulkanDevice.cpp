@@ -16,6 +16,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DeviceFault.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FragmentBarycentric.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PipelineLinkOptimization.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawInputsInPlace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/RobustBufferAccess.hpp"
 #include "prx/libSceAgcDriver/Execution/include/SubgroupClock.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderDeviceProfile.hpp"
@@ -318,6 +319,7 @@ struct VulkanDevice::State {
     // graphics stages, and compute workgroups wider than a wave).
     bool descriptorIndexing = false;
     bool storageBufferUpdateAfterBind = false;
+    bool sampledImageUpdateAfterBind = false;
     bool descriptorBindingPartiallyBound = false;
     bool descriptorBindingVariableDescriptorCount = false;
     bool runtimeDescriptorArray = false;
@@ -343,6 +345,7 @@ struct VulkanDevice::State {
     bool dualSrcBlend = false;
     bool occlusionQueryPrecise = false;
     VkDeviceSize hostImportAlignment = 0;
+    bool drawInputsInPlace = true;
     bool dmaBufImport = false;
     bool sparseBinding = false;
     std::uint32_t queueFamily = 0;
@@ -906,13 +909,14 @@ ComputePipelineReplayResult VulkanDevice::ReplayComputePipeline(const ComputePip
     for (const auto& layout : capture.sets) {
         const bool updateAfterBind = (layout.flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) != 0;
         hasUpdateAfterBindLayout |= updateAfterBind;
-        require(!updateAfterBind || state->storageBufferUpdateAfterBind, "captured update-after-bind descriptors are unsupported");
+        require(!updateAfterBind || state->storageBufferUpdateAfterBind || state->sampledImageUpdateAfterBind, "captured update-after-bind descriptors are unsupported");
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         std::vector<VkDescriptorBindingFlags> flags;
         std::uint32_t variableCount = 0;
         for (const auto& binding : layout.bindings) {
             require((binding.flags & VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT) == 0 || state->descriptorBindingPartiallyBound, "captured partially-bound descriptors are unsupported");
             require((binding.flags & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) == 0 || state->descriptorBindingVariableDescriptorCount, "captured variable descriptor count is unsupported");
+            require((binding.flags & VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT) == 0 || (binding.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? state->storageBufferUpdateAfterBind : state->sampledImageUpdateAfterBind), "captured update-after-bind descriptors are unsupported");
             if ((binding.flags & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) != 0) variableCount = binding.count;
             bindings.push_back({binding.binding, binding.type, binding.count, binding.stages, nullptr});
             flags.push_back(binding.flags);
@@ -1375,6 +1379,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &hostProperties};
         state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &properties);
         state->hostImportAlignment = hostProperties.minImportedHostPointerAlignment;
+#ifdef _WIN32
+        constexpr bool windows = true;
+#else
+        constexpr bool windows = false;
+#endif
+        state->drawInputsInPlace = std::getenv("APS5_NO_DRAW_INPUTS_IN_PLACE") == nullptr && (std::getenv("APS5_DRAW_INPUTS_IN_PLACE") != nullptr || DrawInputsInPlaceUsable(driverProperties.driverID, windows));
         if (!compileOnly) Graphics::SetHostImportWindow(8ull << 20u);
 #ifdef _WIN32
         // Imported pages are locked; locking is bounded by the process working-set minimum.
@@ -1667,16 +1677,17 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
         state->descriptorIndexing = descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE && descriptorIndexingFeatures.shaderStorageImageArrayNonUniformIndexing == VK_TRUE;
         state->storageBufferUpdateAfterBind = descriptorIndexingFeatures.descriptorBindingStorageBufferUpdateAfterBind == VK_TRUE;
+        state->sampledImageUpdateAfterBind = descriptorIndexingFeatures.descriptorBindingSampledImageUpdateAfterBind == VK_TRUE;
         state->descriptorBindingPartiallyBound = descriptorIndexingFeatures.descriptorBindingPartiallyBound == VK_TRUE;
         state->descriptorBindingVariableDescriptorCount = descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount == VK_TRUE;
         state->runtimeDescriptorArray = descriptorIndexingFeatures.runtimeDescriptorArray == VK_TRUE;
-        if (state->storageBufferUpdateAfterBind) {
+        if (state->storageBufferUpdateAfterBind || state->sampledImageUpdateAfterBind) {
             VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &state->descriptorIndexingProperties};
             state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &properties);
         }
     }
     descriptorIndexingFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT};
-    if (state->descriptorIndexing || state->storageBufferUpdateAfterBind || state->descriptorBindingPartiallyBound || state->descriptorBindingVariableDescriptorCount || state->runtimeDescriptorArray) deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    if (state->descriptorIndexing || state->storageBufferUpdateAfterBind || state->sampledImageUpdateAfterBind || state->descriptorBindingPartiallyBound || state->descriptorBindingVariableDescriptorCount || state->runtimeDescriptorArray) deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
     if (state->descriptorIndexing) {
         descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
         descriptorIndexingFeatures.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
@@ -1686,6 +1697,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         state->spirvExtensions.push_back("SPV_EXT_descriptor_indexing");
     }
     descriptorIndexingFeatures.descriptorBindingStorageBufferUpdateAfterBind = state->storageBufferUpdateAfterBind ? VK_TRUE : VK_FALSE;
+    descriptorIndexingFeatures.descriptorBindingSampledImageUpdateAfterBind = state->sampledImageUpdateAfterBind ? VK_TRUE : VK_FALSE;
     descriptorIndexingFeatures.descriptorBindingPartiallyBound = state->descriptorBindingPartiallyBound ? VK_TRUE : VK_FALSE;
     descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount = state->descriptorBindingVariableDescriptorCount ? VK_TRUE : VK_FALSE;
     descriptorIndexingFeatures.runtimeDescriptorArray = state->runtimeDescriptorArray ? VK_TRUE : VK_FALSE;
@@ -1781,7 +1793,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         imageRobustnessFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &imageRobustnessFeatures;
     }
-    if (state->descriptorIndexing || state->storageBufferUpdateAfterBind || state->descriptorBindingPartiallyBound || state->descriptorBindingVariableDescriptorCount || state->runtimeDescriptorArray) {
+    if (state->descriptorIndexing || state->storageBufferUpdateAfterBind || state->sampledImageUpdateAfterBind || state->descriptorBindingPartiallyBound || state->descriptorBindingVariableDescriptorCount || state->runtimeDescriptorArray) {
         descriptorIndexingFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &descriptorIndexingFeatures;
     }
@@ -3679,6 +3691,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.provokingVertexLast = state->provokingVertexLast;
     context.graphicsPipelineLibrary = state->graphicsPipelineLibrary;
     context.pipelineLinkTimeOptimization = state->pipelineLinkTimeOptimization;
+    context.drawInputsInPlace = state->drawInputsInPlace;
     context.provokingVertexModePerPipeline = state->provokingVertexModePerPipeline;
     context.drawIndirectCount = state->drawIndirectCount;
     context.occlusionQueryPrecise = state->occlusionQueryPrecise;
@@ -3691,8 +3704,11 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.runtimeDescriptorArray = state->runtimeDescriptorArray;
     context.partiallyBound = state->descriptorBindingPartiallyBound;
     context.variableDescriptorCount = state->descriptorBindingVariableDescriptorCount;
+    context.sampledImageUpdateAfterBind = state->sampledImageUpdateAfterBind;
     context.imageTableCapacity = ImageTableCapacity(context);
     context.samplerTableCapacity = SamplerTableCapacity(context);
+    context.imageTableUpdateAfterBind = ImageTableUpdateAfterBind(context);
+    context.samplerTableUpdateAfterBind = SamplerTableUpdateAfterBind(context);
     context.geometryShader = state->geometryShader;
     context.sampleRateShading = state->sampleRateShading;
     context.storageImageMultisample = state->storageImageMultisample;
@@ -4258,6 +4274,8 @@ struct RecordedDispatch {
     bool refreshed = false;
     bool resourceKeyMatched = false;
     std::shared_ptr<Graphics::ShaderResources::DrawBindings> bindings{};
+    std::uint64_t cpuArguments = 0;
+    int cpuReason = 0;
 };
 
 VkDevice VulkanDevice::Device() const {
@@ -4562,15 +4580,16 @@ void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& out
     }
     timer.phase(PhaseDecide);
     if (outcome.cpuReason == 0) return;
-    // The read waits for the producing batch through the flush hook, as the driver's resolve
-    // did for every indirect dispatch before; the counts then go through the direct checks.
     const auto readStart = std::chrono::steady_clock::now();
+    Graphics::FinishLeaseWork();
     std::array<std::uint32_t, 3> groups{};
     GuestMemory::Read(arguments, std::as_writable_bytes(std::span(groups)), 4);
     outcome.argumentReadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readStart).count();
     record.x = groups[0];
     record.y = groups[1];
     record.z = groups[2];
+    record.cpuArguments = arguments;
+    record.cpuReason = outcome.cpuReason;
     // Timed before `arguments` is cleared, so the read counts as an indirect phase.
     timer.phase(PhaseArgumentRead);
     // From here on the phases of a CPU-resolved indirect dispatch are charged as direct ones.
@@ -4703,15 +4722,17 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
         if (record.x <= limit[0] && record.y <= limit[1] && record.z <= limit[2]) {
             context.Resolved(&Graphics::DeviceFunctions::cmdDispatch, "vkCmdDispatch")(commands, record.x, record.y, record.z);
         } else {
+            char counted[128] = "";
+            if (record.cpuArguments != 0) std::snprintf(counted, sizeof(counted), " (read on the CPU from the indirect arguments at 0x%llx, cpuReason %d)", static_cast<unsigned long long>(record.cpuArguments), record.cpuReason);
             if (record.shader->program->workgroupMemoryDwords != 0) {
-                char text[256];
-                std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u exceeds device limits %ux%ux%u and a split aliases the device-memory LDS slots, whose base is computed from gl_NumWorkGroups of a single chunk", record.x, record.y, record.z, limit[0], limit[1], limit[2]);
+                char text[384];
+                std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u%s exceeds device limits %ux%ux%u and a split aliases the device-memory LDS slots, whose base is computed from gl_NumWorkGroups of a single chunk", record.x, record.y, record.z, counted, limit[0], limit[1], limit[2]);
                 throw std::runtime_error(text);
             }
             const auto offsets = std::ranges::count_if(record.shader->program->specialization, [](const auto& constant) { return ShaderRecompiler::PipelineSpecialization::IsWorkgroupOffset(constant.id); });
             if (offsets != ShaderRecompiler::PipelineSpecialization::WorkgroupOffsetWords) {
-                char text[192];
-                std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u exceeds device limits %ux%ux%u and the shader takes no workgroup offset", record.x, record.y, record.z, limit[0], limit[1], limit[2]);
+                char text[320];
+                std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u%s exceeds device limits %ux%ux%u and the shader takes no workgroup offset", record.x, record.y, record.z, counted, limit[0], limit[1], limit[2]);
                 throw std::runtime_error(text);
             }
             const auto bindPipeline = context.Resolved(&Graphics::DeviceFunctions::cmdBindPipeline, "vkCmdBindPipeline");

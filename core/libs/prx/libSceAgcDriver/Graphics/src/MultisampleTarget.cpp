@@ -366,6 +366,14 @@ private:
         return clear;
     }
 
+    void requireDccRange(bool valid, const GuestMemory::UnchangedQuery& range, const char* reason) const {
+        if (valid) return;
+        const auto* plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : "CMASK";
+        char text[384];
+        std::snprintf(text, sizeof(text), "%s (%s range 0x%llx+0x%zx, %u samples)", reason, plane, static_cast<unsigned long long>(range.address), range.bytes, target.samples);
+        Require(false, text);
+    }
+
     void checkDccCurrent(const ColorTarget& use) const {
         if (dccRanges.empty()) {
             Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
@@ -375,10 +383,10 @@ private:
         static_cast<void>(MultisampledDccBytes(use));
         Require(use.address == target.address && use.dccAddress == target.dccAddress && use.dccControl == target.dccControl && use.dccAlphaOnMsb == target.dccAlphaOnMsb && use.dccPipeAligned == target.dccPipeAligned && use.cmaskAddress == target.cmaskAddress && use.cmaskBytes == target.cmaskBytes && use.tileMode == target.tileMode && use.elementBytes == target.elementBytes && use.pipeBankXor == target.pipeBankXor, "multisampled DCC target layout or metadata changed");
         for (const auto& range : dccRanges) {
-            Require(GuestMemory::Watched(range.address, range.bytes), "multisampled DCC target reuse requires watched guest memory");
+            requireDccRange(GuestMemory::Watched(range.address, range.bytes), range, "multisampled DCC target reuse requires watched guest memory");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
-            Require(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation) || !GuestMemory::StoredOver(range.address, range.bytes, range.generation), "writes to a resident multisampled DCC target or its metadata are not implemented");
-            if (auto* recorder = Recorder::Active(); recorder != nullptr) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "pending writes to a resident multisampled DCC target or its metadata are not implemented");
+            requireDccRange(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation) || !GuestMemory::StoredOver(range.address, range.bytes, range.generation), range, "writes to a resident multisampled DCC target or its metadata are not implemented");
+            if (auto* recorder = Recorder::Active(); recorder != nullptr) requireDccRange(!recorder->PendingWriteOverlaps(range.address, range.bytes), range, "pending writes to a resident multisampled DCC target or its metadata are not implemented");
         }
     }
 
@@ -496,7 +504,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
     targets().push_back(std::move(target));
     auto& created = *targets().back();
     guard(context, use, created.active, created.metadataValid);
-    if (use.cmaskFastClear && use.dccAddress == 0) created.cmask.SeedKeys(CurrentDccKeys(use.cmaskAddress, static_cast<std::uint64_t>(use.cmaskBytes) * 256u));
+    if (use.cmaskFastClear && use.dccAddress == 0) created.cmask.SeedCode(CurrentUniformMetadataByte(use.cmaskAddress, static_cast<std::size_t>(use.cmaskBytes)));
     created.ApplyFastClear(use);
     created.Keep();
     return created;
@@ -591,6 +599,14 @@ void UpdateResidentImageUnmapObserver_nid_no_patch() {
     GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(anyGuarded().load(std::memory_order_acquire) || HasResidentDepthGuards_nid_no_patch() ? &retireUnmapped : nullptr);
 }
 
+std::optional<DccKeys> MultisampledCmaskKeys(std::uint8_t code) {
+    const auto tile = code & 0xfu;
+    if ((code >> 4u) != tile) return std::nullopt;
+    if (tile == 0u) return DccKeys::Clear0000;
+    if ((tile >> 2u) == 3u) return DccKeys::Uncompressed;
+    return std::nullopt;
+}
+
 void MultisampledCmask::NoteFill(std::uint64_t fillAddress, std::size_t fillBytes, std::uint32_t pattern) {
     if (address == 0 || fillAddress >= address + bytes || address >= fillAddress + fillBytes) return;
     if (fillAddress > address || fillAddress + fillBytes < address + bytes) {
@@ -600,24 +616,24 @@ void MultisampledCmask::NoteFill(std::uint64_t fillAddress, std::size_t fillByte
         return;
     }
     refusal.clear();
-    if (pattern == 0) {
-        keys = DccKeys::Clear0000;
-    } else if (pattern == 0xffffffffu) {
-        keys = DccKeys::Uncompressed;
+    const auto code = static_cast<std::uint8_t>(pattern);
+    if (const auto filled = MultisampledCmaskKeys(code); filled && pattern == code * 0x01010101u) {
+        keys = *filled;
     } else {
-        char text[192];
-        std::snprintf(text, sizeof(text), "a fill of the CMASK 0x%llx+0x%llx of a multisampled color target with 0x%08x leaves its tiles mixed (neither fast-cleared 0 nor expanded 0xffffffff)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), pattern);
+        char text[224];
+        std::snprintf(text, sizeof(text), "a fill of the CMASK 0x%llx+0x%llx of a multisampled color target with 0x%08x leaves its tiles mixed (neither a register color clear 0 nor a color-expanded code such as 0xcc or 0xff)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), pattern);
         refusal = text;
     }
 }
 
-void MultisampledCmask::SeedKeys(DccKeys seeded) {
-    if (seeded == DccKeys::Clear0000 || seeded == DccKeys::Uncompressed) {
-        keys = seeded;
+void MultisampledCmask::SeedCode(std::optional<std::uint8_t> code) {
+    if (const auto seeded = code ? MultisampledCmaskKeys(*code) : std::nullopt) {
+        keys = *seeded;
         return;
     }
     char text[192];
-    std::snprintf(text, sizeof(text), "the CMASK 0x%llx of a multisampled color target reads as %s, which is not modeled", static_cast<unsigned long long>(address), DccKeysName(seeded));
+    if (code) std::snprintf(text, sizeof(text), "the CMASK 0x%llx of a multisampled color target reads as code 0x%02x, which is not modeled", static_cast<unsigned long long>(address), *code);
+    else std::snprintf(text, sizeof(text), "the CMASK 0x%llx of a multisampled color target reads as mixed, which is not modeled", static_cast<unsigned long long>(address));
     refusal = text;
 }
 

@@ -163,6 +163,7 @@ inline constexpr std::uint32_t PositionExportLayoutBits = 0xffffu | (1u << 21u) 
 ShaderStages DecodeShaderStages(const QueueState& queue, bool vertexWorkgroup = false);
 State DecodeState(const QueueState& queue, bool vertexWorkgroup = false);
 void ApplyDepthRemap(const Context& context, State& state);
+void NormalizeUnusedViewportDepth(State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel);
 std::array<VkSampleLocationEXT, 32> SampleLocations(const State& state);
 std::array<std::uint8_t, 32> PixelSampleLocations(const State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel);
 VkExtent2D SampleLocationGrid(const State& state);

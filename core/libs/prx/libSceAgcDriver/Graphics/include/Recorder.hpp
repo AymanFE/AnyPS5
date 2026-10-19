@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RECORDER_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RECORDER_HPP
 
+#include "prx/libSceAgcDriver/Graphics/include/BarrierBatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PassHazards.hpp"
 #include <unordered_map>
@@ -487,6 +488,8 @@ public:
     // (or APS5_NO_BARRIER_ELISION=1) records every leading barrier, as before.
     static bool MergeBarriers();
     static void CountMerged(CommandClass which);
+    static bool BarrierBatch();
+    static bool ElideCovered(CommandClass which, const BarrierMask& wanted, VkAccessFlags covered);
     // Hazard tracker, counting mode (APS5_BARRIER_VALIDATE=1): every command tells the tracker
     // what it reads and writes (guest ranges through host imports, images) with its stage before
     // it is recorded; the tracker simulates barriers emitted only on a hazard against the accesses
@@ -829,6 +832,7 @@ private:
     // Batches popped from inFlight whose completions have not run yet: their writes stay in the
     // snapshot (a rebuild from inside a completion must not drop them) until finish returns.
     std::vector<const Batch*> finishing;
+    mutable std::shared_ptr<const WriteRanges> published;
     std::uint64_t submissions = 0;
     std::size_t inFlightKeptBytes = 0;
     std::uint64_t writeNoteCount = 0;

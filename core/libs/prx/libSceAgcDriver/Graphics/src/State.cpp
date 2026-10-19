@@ -20,6 +20,14 @@
 #include <string_view>
 
 namespace AgcDriver::Graphics {
+
+void NormalizeUnusedViewportDepth(State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel) {
+    if (state.depth || pixel.posZ) return;
+    if (!std::isfinite(state.viewport.minDepth) || !std::isfinite(state.viewport.maxDepth)) return;
+    state.viewport.minDepth = std::clamp(state.viewport.minDepth, 0.0f, 1.0f);
+    state.viewport.maxDepth = std::clamp(state.viewport.maxDepth, 0.0f, 1.0f);
+}
+
 namespace {
 
 std::uint32_t read(const Registers& registers, std::uint32_t offset, RegisterBank bank = RegisterBank::Context) {
@@ -444,7 +452,7 @@ std::string singleSampleMsaaRejection(const QueueState& queue) {
     }
     if (const auto alphaToMask = word(cx, 0x2dc); alphaToMask && (*alphaToMask & 1u) != 0 && !(*alphaToMask == AlphaToCoverageDithered && alphaToCoverageDisabled(cx))) return zeroMessage(0x2dc, *alphaToMask, "MSAA_ENABLE on a single-sample target with alpha-to-coverage");
     if (const auto conservative = word(cx, 0x313); conservative && (*conservative & ~0x001f6000u) != 0) return zeroMessage(0x313, *conservative, "MSAA_ENABLE on a single-sample target with conservative rasterization");
-    return nonTriangleRejection(queue, "MSAA_ENABLE on a single-sample target for primitives other than triangles");
+    return nonTriangleRejection(queue, "MSAA_ENABLE on a single-sample target for primitives other than triangles and rectangles", true);
 }
 
 std::string singleSampleDepthScanRejection(const QueueState& queue) {
@@ -1781,7 +1789,9 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
         std::snprintf(text, sizeof(text), "CB metadata pass with depth or stencil work (DB_DEPTH_CONTROL 0x%08x, DB_RENDER_CONTROL 0x%08x, DB_Z_INFO 0x%08x, DB_STENCIL_INFO 0x%08x)", value(0x200), value(0x0), value(0x010), value(0x011));
         throw std::runtime_error(text);
     }
-    const auto samples = resolve && rasterizerSamples ? decodeSamples(cx) : 1u;
+    const auto modeControl = find(cx, 0x292);
+    const bool multisampleRaster = modeControl != cx.end() && (modeControl->second & 1u) != 0;
+    const auto samples = resolve && rasterizerSamples && multisampleRaster ? decodeSamples(cx) : 1u;
     if (!resolve) zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
     zero(cx, 0x80, ~0u, "window offset");
     const auto viewportControl = read(cx, 0x206);

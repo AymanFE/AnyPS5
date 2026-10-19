@@ -18,6 +18,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
+#include "ThreadOwned.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -345,7 +346,7 @@ constexpr std::array<const char*, PhaseCount> DrawPhaseNames{"validate", "vertex
 enum SyncReason : std::size_t { SyncNone, SyncNotResident, SyncNoRecorder, SyncDisabled, SyncCopiedWrites, SyncLease, SyncCount };
 constexpr std::array<const char*, SyncCount> SyncReasonNames{"none", "non-resident target", "no recorder", "disabled", "copied writes", "lease"};
 constexpr std::size_t IndirectPathCount = static_cast<std::size_t>(IndirectDrawPath::Count);
-constexpr std::array<const char*, IndirectPathCount> IndirectDrawPathNames{"gpu-side", "patched SGPR not folded", "fetch offset unknown", "non-vertex path", "GE_INDX_OFFSET", "draw index", "vertex range too large", "feature gap", "pending image results", "pending label or copied write", "not imported", "disabled"};
+constexpr std::array<const char*, IndirectPathCount> IndirectDrawPathNames{"gpu-side", "patched SGPR not folded", "fetch offset unknown", "non-vertex path", "GE_INDX_OFFSET", "draw index", "vertex range too large", "feature gap", "pending image results", "pending label or copied write", "not imported", "disabled", "index range not fully readable"};
 
 // Why a recorded draw began a render pass instead of continuing the previous draw's: the
 // attachments or extent differ (the game's own target switch), nothing was open (the first draw of
@@ -786,7 +787,9 @@ bool MovableBuffers() {
 }
 
 ResourceCache::Key DrawResourceKey(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::uint64_t indexBytes, bool ranges) {
-    ResourceCache::Key key{0xffffffffu};
+    ResourceCache::Key key;
+    key.reserve(256);
+    key.push_back(0xffffffffu);
     const auto append64 = [&](std::uint64_t value) {
         key.push_back(static_cast<std::uint32_t>(value));
         key.push_back(static_cast<std::uint32_t>(value >> 32u));
@@ -794,9 +797,10 @@ ResourceCache::Key DrawResourceKey(const Context& context, std::span<const Compi
     append64(reinterpret_cast<std::uint64_t>(context.device));
     key.push_back(static_cast<std::uint32_t>(shaders.size()));
     for (const auto& shader : shaders) {
-        const auto part = ShaderResources::ContentKey(shader, true, MovableBuffers());
-        key.push_back(static_cast<std::uint32_t>(part.size()));
-        key.insert(key.end(), part.begin(), part.end());
+        const auto at = key.size();
+        key.push_back(0);
+        ShaderResources::AppendContentKey(shader, true, MovableBuffers(), key);
+        key[at] = static_cast<std::uint32_t>(key.size() - at - 1);
     }
     key.push_back(colorAttachments);
     if (ranges) {
@@ -994,7 +998,7 @@ void KeepDrawInput(Recorder* recorder, std::uint64_t address, const DrawInputCop
 
 const HostImport* InPlaceDrawInput(const Context& context, std::uint64_t address, std::size_t bytes, std::size_t alignment, bool* behindGpuWrite) {
     auto* recorder = context.recorder;
-    if (recorder == nullptr || bytes == 0) return nullptr;
+    if (recorder == nullptr || bytes == 0 || !context.drawInputsInPlace) return nullptr;
     if (bytes <= Recorder::DrawInputBudget && !recorder->PendingWriteOverlaps(address, bytes) && GuestMemory::Watched(address, bytes)) return nullptr;
     bool behind = false;
     if (behindGpuWrite == nullptr) {
@@ -1934,7 +1938,10 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
     const bool addressBased = resources.HoldsLease();
-    auto passReads = addressBased ? std::vector<std::pair<std::uint64_t, std::uint64_t>>{} : resources.DeviceReads();
+    thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>>* passReadsSlot = nullptr;
+    auto& passReads = ShaderRecompiler::ThreadOwned(passReadsSlot);
+    passReads.clear();
+    if (!addressBased) resources.DeviceReads(passReads);
     if (gpuIndirect) {
         passReads.emplace_back(args->arguments, args->arguments + args->RangeBytes());
         if (args->countIndirect) passReads.emplace_back(args->countAddress, args->countAddress + 4);

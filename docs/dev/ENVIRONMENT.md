@@ -114,6 +114,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_DRAIN_COMPLETION_LABELS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/DeferredLabels.cpp` |  | records completion labels immediately instead of deferring them with the batch |
 | `APS5_DRAW_CACHE_ENTRIES` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` | 4096 | number of entries in the draw cache; 0 keeps the default 4096 |
 | `APS5_DRAW_DRAIN` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp` |  | treats draw packets as drains, waiting for them instead of recording ahead |
+| `APS5_DRAW_INPUTS_IN_PLACE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | binds draw vertex and index ranges in place from host imports also with NVIDIA's Windows driver, which copies them by default |
 | `APS5_DRAW_KEY_ALL_USER_WORDS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp` |  | includes all 32 user words in a draw's register key instead of the used count |
 | `APS5_DRAW_SNAPSHOT_MAX_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 64 | upper bound in MiB on the snapshot bytes a draw's bindings may take |
 | `APS5_DRAW_TRANSITIONS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | keeps the per-draw upload and download barriers and layout transitions instead of the lean recorded path |
@@ -183,6 +184,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_ADJACENT_GENERATION` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | leaves adjacent pending images at their generation during a write-back, as before |
 | `APS5_NO_ALIAS_BORROW` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | disables borrowing a pending aliased storage image |
 | `APS5_NO_ATOMIC_STAGING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | binds atomic shader elements in place instead of staging them through a device-local buffer |
+| `APS5_NO_BARRIER_BATCH` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | records the staging, write-back and label-run leading barriers that a covering barrier already orders, instead of leaving them out |
 | `APS5_NO_BARRIER_ELISION` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | records every leading barrier instead of merging it into the following submission |
 | `APS5_NO_BDA_TABLE_CACHE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/BdaResources.cpp` |  | builds every BDA descriptor table instead of reusing the recent-table cache |
 | `APS5_NO_BLOCK_TRACKING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | tracks array layers, or the whole surface, instead of 64 KiB blocks |
@@ -206,6 +208,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_DISPATCH_MOVE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | leaves a dispatch-cache hit from moving its read-only buffers into the template, so it prepares the dispatch again; also off when APS5_NO_TEMPLATE_DATA_REFRESH is set |
 | `APS5_NO_DISPATCH_RECIPE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | builds no dispatch recipes, so dispatch-cache hits repeat the recorded work |
 | `APS5_NO_DRAW_DATA_HITS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | disables draw-cache hits that differ only in ShaderData words |
+| `APS5_NO_DRAW_INPUTS_IN_PLACE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | copies draw vertex and index ranges instead of binding them in place from host imports, on any device; wins over `APS5_DRAW_INPUTS_IN_PLACE` |
 | `APS5_NO_DRAW_KEY` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | registers no draw key, so every draw decodes its programs instead of hitting the draw cache |
 | `APS5_NO_DRAW_KEY_TRIM` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | keys the render target and index ranges into the draw resource key instead of repeating the alias checks on a hit |
 | `APS5_NO_DRAW_PRECHECK` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawPrecheck.cpp` |  | disables the draw precheck that rejects empty or invalid draws early |

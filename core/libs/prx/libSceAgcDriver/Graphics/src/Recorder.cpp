@@ -507,6 +507,8 @@ void ReleaseDeferredKeeps() {
 // Lock-free state of the active recorder's open batch, read by the queue workers between packets
 // and inside WAIT_REG_MEM polls (see the static readers in Recorder.hpp). Written under the mutex.
 constexpr std::int64_t NoPendingLabel = std::numeric_limits<std::int64_t>::min();
+constexpr BarrierMask PassEndBarrier{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT};
+constexpr BarrierMask LabelLeadingBarrier{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT};
 std::atomic<std::int64_t> pendingLabelSince{NoPendingLabel};
 std::atomic<std::uint64_t> writeGeneration{0};
 std::atomic<std::uint64_t> publishGeneration{0};
@@ -659,11 +661,15 @@ bool SnapshotOverlaps(std::uint64_t address, std::size_t bytes) {
 }
 
 // Whether one merged range of the snapshot contains [address, end) entirely.
-bool SnapshotCovers(std::uint64_t address, std::uint64_t end) {
-    const auto snapshot = pendingWrites.load(std::memory_order_acquire);
+bool SnapshotCovers(const WriteRanges* snapshot, std::uint64_t address, std::uint64_t end) {
     if (snapshot == nullptr || snapshot->empty()) return false;
     const auto it = std::partition_point(snapshot->begin(), snapshot->end(), [&](const auto& range) { return range.second <= address; });
     return it != snapshot->end() && it->first <= address && end <= it->second;
+}
+
+bool SnapshotCovers(std::uint64_t address, std::uint64_t end) {
+    const auto snapshot = pendingWrites.load(std::memory_order_acquire);
+    return SnapshotCovers(snapshot.get(), address, end);
 }
 
 // Attribution of the pending-write syncs the hook makes (the [hooksync] line every 10 s, under
@@ -1420,7 +1426,7 @@ void Recorder::endOpenRenderPass(bool barrier) {
     // The pass's attachment and shader writes are visible to everything recorded after it (the
     // host sees them at the batch's fence).
     if (barrier) {
-        recordBarrier(open->commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        recordBarrier(open->commands, PassEndBarrier.srcStage, PassEndBarrier.dstStage, PassEndBarrier.srcAccess, PassEndBarrier.dstAccess);
         CountBarriers(CommandClass::Draw);
     }
     if (pass.afterPass) pass.afterPass(open->commands);
@@ -1640,6 +1646,7 @@ bool Recorder::closeStoreRun(bool atSubmit) {
         // A label says the work before it is done: the queued key stores (results of that work)
         // land ahead of every store of the run, and the pass a draw left open ends.
         if (!open->keyStores.empty()) recordKeyStores(true);
+        const bool passEndLast = open->renderPass.open && !open->renderPass.afterPass;
         if (open->renderPass.open) endOpenRenderPass();
         const auto commands = open->commands;
         run.timing = beginTiming(ClassKey(CommandClass::LabelRun));
@@ -1650,9 +1657,15 @@ bool Recorder::closeStoreRun(bool atSubmit) {
         }
         // At Submit every result of the batch reaches the host before the stores (the title's
         // pollers read results after the label); in place, later work sees the stores as well.
-        if (atSubmit) recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT);
-        else recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         std::uint32_t barriers = 2;
+        if (atSubmit) {
+            recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT);
+        } else if (passEndLast && BarrierBatch() && Covers(PassEndBarrier, LabelLeadingBarrier)) {
+            CountMerged(CommandClass::LabelRun);
+            barriers = 1;
+        } else {
+            recordBarrier(commands, LabelLeadingBarrier.srcStage, LabelLeadingBarrier.dstStage, LabelLeadingBarrier.srcAccess, LabelLeadingBarrier.dstAccess);
+        }
         std::uint64_t storedBytes = 0;
         const auto update = function(cmdUpdateBuffer, "vkCmdUpdateBuffer");
         std::vector<QueuedWrite> writes;
@@ -1834,6 +1847,17 @@ void Recorder::CountBarriers(CommandClass which, std::uint32_t count) {
 bool Recorder::MergeBarriers() {
     static const bool merge = std::getenv("APS5_FULL_BARRIERS") == nullptr && std::getenv("APS5_NO_BARRIER_ELISION") == nullptr;
     return merge;
+}
+
+bool Recorder::BarrierBatch() {
+    static const bool batch = MergeBarriers() && std::getenv("APS5_NO_BARRIER_BATCH") == nullptr;
+    return batch;
+}
+
+bool Recorder::ElideCovered(CommandClass which, const BarrierMask& wanted, VkAccessFlags covered) {
+    if (!BarrierBatch() || !OrderedByTrailing(covered, wanted)) return false;
+    CountMerged(which);
+    return true;
 }
 
 void Recorder::CountMerged(CommandClass which) {
@@ -2764,6 +2788,7 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
     const auto end = address + bytes;
     open->writes.emplace_back(address, end);
     open->writeNotes.push_back(++writeNoteCount);
+    if (published != nullptr && !SnapshotCovers(published.get(), address, end)) published = nullptr;
     open->writeValues.push_back(static_cast<std::int16_t>(value));
     open->writeWords.push_back(word);
     if (!ownLabel) markOverwritten(address, end);
@@ -2792,6 +2817,7 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
     // moves as well, so a poller re-consults the label table for a completion label.
     batch.writes.emplace_back(address, address + bytes);
     batch.writeNotes.push_back(++writeNoteCount);
+    if (published != nullptr && !SnapshotCovers(published.get(), address, address + bytes)) published = nullptr;
     batch.writeValues.push_back(-1);
     batch.writeWords.push_back(-1);
     if (!ownLabel) markOverwritten(address, address + bytes);
@@ -2889,6 +2915,7 @@ void Recorder::publishPendingWrites(std::span<const std::pair<std::uint64_t, std
     }
     publishedWriteRangesValid = std::all_of(merged->begin(), merged->end(), [](const auto& range) { return range.second > range.first; });
     publishedWriteRanges = merged;
+    published = merged;
     pendingWrites.store(std::move(merged), std::memory_order_release);
     publishGeneration.fetch_add(1, std::memory_order_release);
     ++snapshotRebuilds;
@@ -2904,6 +2931,7 @@ bool Recorder::overlaps(const Batch& batch, std::uint64_t address, std::uint64_t
 
 bool Recorder::PendingWriteOverlaps(std::uint64_t address, std::size_t bytes) const {
     if (bytes == 0) return false;
+    if (published != nullptr && !SnapshotOverlaps(published.get(), address, bytes)) return false;
     const auto end = address + bytes;
     if (open != nullptr && overlaps(*open, address, end)) return true;
     for (const auto& batch : inFlight) {
